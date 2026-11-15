@@ -85,6 +85,10 @@ pub struct ParametricGlottis {
     pitch_factor: f64,
     /// smoothed voicing gate 0..1 (telemetry)
     pub voicing: f64,
+    /// the voicing gate's factors this sample, before smoothing (telemetry): transglottal
+    /// pressure above the phonation threshold, and the folds close enough (static abduction)
+    pub pressure_gate: f64,
+    pub adduct_gate: f64,
     voicing_sm: f64,
     /// smoothed transglottal pressure (dyn/cm²)
     dp_sm: f64,
@@ -129,10 +133,16 @@ impl ParametricGlottis {
             f0_now: 110.0,
             threshold: 2.5 * CM_H2O,
             static_sm: 0.0,
+            pressure_gate: 0.0,
+            adduct_gate: 0.0,
             closure_sm: 0.0,
             amp_sm: 0.0,
             sm_coef: 1.0 - exp(-1.0 / (0.004 * fs)),
         }
+    }
+    /// the static abduction (cm², smoothed, chink included) the voicing gate reads (telemetry)
+    pub fn static_abduction(&self) -> f64 {
+        self.static_sm
     }
 
     /// Reset phase etc.
@@ -172,6 +182,8 @@ impl ParametricGlottis {
         let pressure_gate = smoothstep(self.threshold * 0.8, self.threshold * 1.6, self.dp_sm);
         let adduct_gate = 1.0 - smoothstep(0.08, 0.22, self.static_sm - p.chink);
         let target = pressure_gate * adduct_gate * (1.0 - self.closure_sm);
+        self.pressure_gate = pressure_gate;
+        self.adduct_gate = adduct_gate;
         self.voicing_sm += self.voice_coef * (target - self.voicing_sm);
         self.voicing = self.voicing_sm;
 

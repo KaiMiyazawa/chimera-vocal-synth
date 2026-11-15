@@ -14,7 +14,6 @@ const ALIASES: [(&str, &str); 9] = [("t͡ʃ", "tʃ"), ("d͡ʒ", "dʒ"), ("t͡s",
 /// devoiced
 const NASALIZED: char = '\u{303}';
 const BREATHY: char = '\u{324}';
-/// combining ring below: the vowel before it is devoiced
 const DEVOICED: char = '\u{325}';
 /// combining inverted breve below (non-syllabic, `aɪ̯`) and combining vertical line below (syllabic,
 /// `bʌtn̩`): in most dictionary IPA, and the voice says the sound they mark, so they are never reported

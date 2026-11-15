@@ -145,8 +145,10 @@ branching (nasal tract, sinuses, piriform fossae, two bronchi, vocal sacs, OEC).
   touched). `ʱ` after a voiced stop or affricate and a combining diaeresis below on a vowel
   (`breathy`): glottal abduction of 0.1, as for /ɦ/, over the release and 80 ms after it, or over
   the vowel. A combining ring below on a vowel (`devoiced`, also the precomposed ḁ): a glottal
-  opening of 0.6 cm² held over the vowel, so the folds stop. A mark on a sound it doesn't apply to is ignored, and with no flag set the plan is
-  the one English always had. Other IPA diacritics are still dropped.
+  opening of 0.6 cm² held over the vowel, so the folds stop. A mark on a sound it doesn't apply
+  to is ignored, and with no flag set the plan is the one English always had. Other IPA
+  diacritics are still dropped. `targetless` (no mark sets it; for research): a vowel without a
+  tongue, jaw or lip target of its own, which keeps its time and pitch.
 
 ## 5. FX / output
 

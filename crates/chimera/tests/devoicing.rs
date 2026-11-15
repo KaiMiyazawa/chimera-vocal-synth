@@ -110,3 +110,49 @@ fn sung_vowels_keep_their_devoicing_and_targetlessness() {
         assert!(labelled(&gs, "ɯ").is_empty());
     }
 }
+
+#[test]
+fn a_devoiced_diphthong_holds_the_folds_apart_through_its_glide() {
+    let p = plan(&tokenize_ipa("ˈk˭aɪ\u{325}t˭a"));
+    let own = labelled(&p.gestures, "devoiced");
+    assert_eq!(own.len(), 1, "one opening for the whole diphthong");
+    // the diphthong is planned as two halves; the opening runs to the end of the second
+    let (first, glide) = (&p.segments[1], &p.segments[2]);
+    assert_eq!((first.kind.as_str(), glide.kind.as_str()), ("vowel", "vowel"));
+    assert_eq!(own[0].t0, first.t0);
+    assert_eq!(own[0].t1, glide.t1);
+}
+
+#[test]
+fn a_targetless_last_vowel_leaves_the_one_before_it_as_it_was() {
+    let mut segs = tokenize_ipa("ˈsasɯ");
+    let plain = plan(&segs);
+    segs[3].targetless = Some(true);
+    let bare = plan(&segs);
+    assert!(labelled(&bare.gestures, "ɯ").is_empty());
+    // the first /a/ was already the last posed vowel's neighbour; with /ɯ/ gone it is the last
+    // posed vowel, so it lets go as an utterance-final vowel would (ramp 0.4 × 80 ms + 10 ms)
+    let a = labelled(&bare.gestures, "a");
+    assert_eq!(a.len(), 1);
+    assert!((a[0].ramp_out - (0.4 * 0.08 + 0.01)).abs() < 1e-12, "ramp out {}", a[0].ramp_out);
+    assert_ne!(json(&labelled(&plain.gestures, "a")), json(&a));
+}
+
+/// Bug (f06b7b1): a targetless r-coloured vowel counted as having placed the tongue tip, so a
+/// following stop behind a front closure was delayed although no tip gesture had been made.
+#[test]
+fn a_targetless_rhotic_vowel_does_not_pre_place_a_closure() {
+    // /t/ has two gestures: the approach, which leads, and the closure, which starts at the
+    // segment unless it is delayed
+    let t0 = |segs: &[Segment]| labelled(&plan(segs).gestures, "t").iter().map(|g| g.t0).fold(f64::MIN, f64::max);
+    let with_rhotic = tokenize_ipa("ˈɝpta");
+    let mut bare_rhotic = with_rhotic.clone();
+    bare_rhotic[0].targetless = Some(true);
+    let plain_vowel = tokenize_ipa("ˈʌpta");
+    let start_of = |segs: &[Segment]| plan(segs).segments[2].t0;
+    // precondition: after a rhotic vowel the /t/ closure is delayed past its segment start (25 ms)
+    assert!(t0(&with_rhotic) > start_of(&with_rhotic) + 0.02, "the rhotic vowel should pre-place the tip");
+    // without its target it places nothing: no delay, as after /ʌ/
+    assert!((t0(&bare_rhotic) - start_of(&bare_rhotic)).abs() < 1e-9);
+    assert!((t0(&plain_vowel) - start_of(&plain_vowel)).abs() < 1e-9);
+}
