@@ -10,7 +10,8 @@ const VOWEL_CHARS: &str = "iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaɶɑɒɝ�
 const MULTI: [&str; 14] = ["tʃ", "dʒ", "ts", "dz", "pf", "tɕ", "dʑ", "tʂ", "dʐ", "aɪ", "aʊ", "ɔɪ", "eɪ", "oʊ"];
 const ALIASES: [(&str, &str); 9] = [("t͡ʃ", "tʃ"), ("d͡ʒ", "dʒ"), ("t͡s", "ts"), ("d͡z", "dz"), ("ɡ", "g"), ("ʧ", "tʃ"), ("ʤ", "dʒ"), ("r̥", "r"), ("ɐ̯", "ɐ")];
 
-/// combining tilde and combining diaeresis below: the vowel before them is nasalized, breathy
+/// combining tilde, diaeresis below and ring below: the vowel before them is nasalized, breathy,
+/// devoiced
 const NASALIZED: char = '\u{303}';
 const BREATHY: char = '\u{324}';
 /// combining ring below: the vowel before it is devoiced
@@ -21,7 +22,7 @@ const NONSYLLABIC: char = '\u{32F}';
 const SYLLABIC: char = '\u{329}';
 /// NFC composes these vowels with their mark into one code point; the tokenizer reads them as the
 /// vowel and the mark (those that don't compose, like ɛ̃, arrive as two)
-const PRECOMPOSED: [(&str, &str); 7] = [("ã", "a\u{303}"), ("õ", "o\u{303}"), ("ẽ", "e\u{303}"), ("ĩ", "i\u{303}"), ("ũ", "u\u{303}"), ("ỹ", "y\u{303}"), ("ṳ", "u\u{324}")];
+const PRECOMPOSED: [(&str, &str); 8] = [("ã", "a\u{303}"), ("õ", "o\u{303}"), ("ẽ", "e\u{303}"), ("ĩ", "i\u{303}"), ("ũ", "u\u{303}"), ("ỹ", "y\u{303}"), ("ṳ", "u\u{324}"), ("ḁ", "a\u{325}")];
 
 fn known() -> &'static HashSet<&'static str> {
     static K: OnceLock<HashSet<&'static str>> = OnceLock::new();
@@ -252,8 +253,8 @@ fn tokenize(input: &str, gaps: &mut Gaps) -> Vec<Segment> {
             tok = ch.to_string();
         }
         i += tok.chars().count();
-        // combining diacritics: the tilde and the diaeresis below on a vowel are read, the rest we
-        // do not model
+        // combining diacritics: the tilde, the diaeresis below and the ring below on a vowel are
+        // read, the rest we do not model
         let marks_from = i;
         let (mut nasalized, mut breathy, mut devoiced) = (false, false, false);
         while i < s.len() && ('\u{300}'..='\u{36F}').contains(&s[i]) {
@@ -270,7 +271,7 @@ fn tokenize(input: &str, gaps: &mut Gaps) -> Vec<Segment> {
             continue;
         }
         let is_v = is_vowel_token(&tok);
-        // what is left unread: any mark but a tilde or diaeresis below on a vowel, and the
+        // what is left unread: any mark but a tilde, diaeresis below or ring below on a vowel, and the
         // syllabic and non-syllabic marks on any letter (never reported)
         let unread: String = s[marks_from..i].iter().copied().filter(|c| !(is_v && (*c == NASALIZED || *c == BREATHY || *c == DEVOICED)) && *c != NONSYLLABIC && *c != SYLLABIC).collect();
         if !unread.is_empty() {

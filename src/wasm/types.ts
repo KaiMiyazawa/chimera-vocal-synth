@@ -165,6 +165,10 @@ export interface Segment {
   palatalized?: boolean;
   /** breathy voice: a voiced stop or affricate's release (IPA ʱ), or a vowel (combining diaeresis below) */
   breathy?: boolean;
+  /** a devoiced vowel: the folds held apart through it (IPA combining ring below) */
+  devoiced?: boolean;
+  /** a vowel with no tongue, jaw or lip target of its own (no IPA mark sets it) */
+  targetless?: boolean;
 }
 
 /** What the engine will not say as written in a piece of IPA text (see `skippedIpa`). */

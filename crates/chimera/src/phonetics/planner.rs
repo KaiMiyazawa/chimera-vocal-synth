@@ -179,8 +179,13 @@ struct Seg<'a> {
     targetless: Option<bool>,
 }
 
-/// glottal abduction of a devoiced vowel (cm²): twice a voiceless fricative's, one opening over
-/// the vowel (Fujimoto et al. 2002 measured more than twice a single consonant's)
+/// glottal abduction of a devoiced vowel (cm²), held over the vowel at a voiceless consonant's
+/// strength (6, so it saturates at a third of full activation like theirs). A working value, not a
+/// measurement: Fujimoto et al. 2002 found one glottal opening over the vowel, more than twice a
+/// single consonant's, but in photoglottographic units, which do not map linearly to area; 0.6 is
+/// twice a voiceless fricative's 0.3 and well past the 0.22 at which the folds stop. Blended with
+/// a neighbour's opening by strength, the edge falls between the two, so the vowel and its
+/// consonants read as one opening.
 const DEVOICED_ABDUCTION: f64 = 0.6;
 
 /// glottal abduction of breathy voice: /ɦ/'s, a gap the folds still vibrate across
@@ -528,7 +533,7 @@ fn pre_placed_behind_closure(segs: &[Seg], i: usize) -> bool {
         return false;
     }
     let before = &segs[i - 2];
-    let rhotic = before.vowel.as_ref().filter(|v| v.get(ArticKey::TtCurl).unwrap_or(0.0) > 0.05);
+    let rhotic = before.vowel.as_ref().filter(|v| before.targetless != Some(true) && v.get(ArticKey::TtCurl).unwrap_or(0.0) > 0.05);
     let Some(tg) = before.def.as_ref().map(|d| &d.targets).or(rhotic) else { return false };
     def.dominant.iter().all(|k| tg.get(*k).is_some())
 }
