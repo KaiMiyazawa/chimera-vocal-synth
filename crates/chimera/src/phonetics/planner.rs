@@ -175,7 +175,13 @@ struct Seg<'a> {
     nasalized: Option<bool>,
     palatalized: Option<bool>,
     breathy: Option<bool>,
+    devoiced: Option<bool>,
+    targetless: Option<bool>,
 }
+
+/// glottal abduction of a devoiced vowel (cm²): twice a voiceless fricative's, one opening over
+/// the vowel (Fujimoto et al. 2002 measured more than twice a single consonant's)
+const DEVOICED_ABDUCTION: f64 = 0.6;
 
 /// glottal abduction of breathy voice: /ɦ/'s, a gap the folds still vibrate across
 const BREATHY_ABDUCTION: f64 = 0.1;
@@ -211,10 +217,10 @@ pub fn plan_utterance(input: &[Segment], o: &PlanOptions) -> Plan {
             let base = durs[si];
             for (i, p) in parts.iter().enumerate() {
                 let dur = if parts.len() > 1 { base * (if i == 0 { 0.55 } else { 0.45 }) } else { base };
-                segs.push(Seg { ipa: p, dur: Some(dur), stress: s.stress, f0: s.f0, def: None, vowel: None, glide_from: i > 0, aspirated: None, vot: None, nasalized: s.nasalized, palatalized: None, breathy: s.breathy });
+                segs.push(Seg { ipa: p, dur: Some(dur), stress: s.stress, f0: s.f0, def: None, vowel: None, glide_from: i > 0, aspirated: None, vot: None, nasalized: s.nasalized, palatalized: None, breathy: s.breathy, devoiced: s.devoiced, targetless: s.targetless });
             }
         } else {
-            segs.push(Seg { ipa: &s.ipa, dur: Some(durs[si]), stress: s.stress, f0: s.f0, def: None, vowel: None, glide_from: false, aspirated: s.aspirated, vot: s.vot, nasalized: s.nasalized, palatalized: s.palatalized, breathy: s.breathy });
+            segs.push(Seg { ipa: &s.ipa, dur: Some(durs[si]), stress: s.stress, f0: s.f0, def: None, vowel: None, glide_from: false, aspirated: s.aspirated, vot: s.vot, nasalized: s.nasalized, palatalized: s.palatalized, breathy: s.breathy, devoiced: s.devoiced, targetless: s.targetless });
         }
     }
     for s in segs.iter_mut() {
@@ -251,9 +257,12 @@ pub fn plan_utterance(input: &[Segment], o: &PlanOptions) -> Plan {
     let end = t;
     // ---- vowel gestures: overlap neighbours so the tongue travels vowel-to-vowel
     let v_idx: Vec<usize> = segs.iter().enumerate().filter(|(_, s)| s.vowel.is_some()).map(|(i, _)| i).collect();
-    for (n, &i) in v_idx.iter().enumerate() {
-        let prev = if n > 0 { times[v_idx[n - 1]].t1 } else { times[i].t0 - 0.08 };
-        let next = if n < v_idx.len() - 1 { times[v_idx[n + 1]].t0 } else { times[i].t1 + 0.08 };
+    // a targetless vowel has no posture gesture: its neighbours' ramps span it (it keeps its
+    // time and its pitch)
+    let posed: Vec<usize> = v_idx.iter().copied().filter(|&i| segs[i].targetless != Some(true)).collect();
+    for (n, &i) in posed.iter().enumerate() {
+        let prev = if n > 0 { times[posed[n - 1]].t1 } else { times[i].t0 - 0.08 };
+        let next = if n < posed.len() - 1 { times[posed[n + 1]].t0 } else { times[i].t1 + 0.08 };
         // vowel-to-vowel through the consonant (Öhman): the previous vowel lets go early in the gap
         // and the next one's target ramps in over most of it, so the tongue body is already near
         // the next vowel at the release and the transitions carry the consonant's place
@@ -283,6 +292,10 @@ pub fn plan_utterance(input: &[Segment], o: &PlanOptions) -> Plan {
             if s.breathy == Some(true) {
                 // breathy: the folds part-open, as for /ɦ/
                 gestures.push(Gesture::new(t0, end, 0.03, 0.03, 5.0, one(ControlKey::ABDUCTION, BREATHY_ABDUCTION)).label("breathy"));
+            }
+            if s.devoiced == Some(true) {
+                // devoiced: the folds held apart through the vowel
+                gestures.push(Gesture::new(t0, end, 0.03, 0.03, 6.0, one(ControlKey::ABDUCTION, DEVOICED_ABDUCTION)).label("devoiced"));
             }
         }
         let Some(def) = s.def.as_ref() else { continue };

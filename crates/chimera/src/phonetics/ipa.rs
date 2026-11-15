@@ -13,6 +13,8 @@ const ALIASES: [(&str, &str); 9] = [("t͡ʃ", "tʃ"), ("d͡ʒ", "dʒ"), ("t͡s",
 /// combining tilde and combining diaeresis below: the vowel before them is nasalized, breathy
 const NASALIZED: char = '\u{303}';
 const BREATHY: char = '\u{324}';
+/// combining ring below: the vowel before it is devoiced
+const DEVOICED: char = '\u{325}';
 /// combining inverted breve below (non-syllabic, `aɪ̯`) and combining vertical line below (syllabic,
 /// `bʌtn̩`): in most dictionary IPA, and the voice says the sound they mark, so they are never reported
 const NONSYLLABIC: char = '\u{32F}';
@@ -216,9 +218,10 @@ fn tokenize(input: &str, gaps: &mut Gaps) -> Vec<Segment> {
             continue;
         }
         // a vowel mark after the length mark instead of the vowel (ɛː̃)
-        if (ch == NASALIZED || ch == BREATHY) && i > 0 && (s[i - 1] == 'ː' || s[i - 1] == ':') {
+        if (ch == NASALIZED || ch == BREATHY || ch == DEVOICED) && i > 0 && (s[i - 1] == 'ː' || s[i - 1] == ':') {
             match out.last_mut().filter(|l| is_vowel_token(&l.ipa)) {
                 Some(last) if ch == NASALIZED => last.nasalized = Some(true),
+                Some(last) if ch == DEVOICED => last.devoiced = Some(true),
                 Some(last) => last.breathy = Some(true),
                 None => gaps.ignore(out.last(), ch),
             }
@@ -252,10 +255,11 @@ fn tokenize(input: &str, gaps: &mut Gaps) -> Vec<Segment> {
         // combining diacritics: the tilde and the diaeresis below on a vowel are read, the rest we
         // do not model
         let marks_from = i;
-        let (mut nasalized, mut breathy) = (false, false);
+        let (mut nasalized, mut breathy, mut devoiced) = (false, false, false);
         while i < s.len() && ('\u{300}'..='\u{36F}').contains(&s[i]) {
             nasalized |= s[i] == NASALIZED;
             breathy |= s[i] == BREATHY;
+            devoiced |= s[i] == DEVOICED;
             i += 1;
         }
         if !known.contains(tok.as_str()) {
@@ -268,11 +272,11 @@ fn tokenize(input: &str, gaps: &mut Gaps) -> Vec<Segment> {
         let is_v = is_vowel_token(&tok);
         // what is left unread: any mark but a tilde or diaeresis below on a vowel, and the
         // syllabic and non-syllabic marks on any letter (never reported)
-        let unread: String = s[marks_from..i].iter().copied().filter(|c| !(is_v && (*c == NASALIZED || *c == BREATHY)) && *c != NONSYLLABIC && *c != SYLLABIC).collect();
+        let unread: String = s[marks_from..i].iter().copied().filter(|c| !(is_v && (*c == NASALIZED || *c == BREATHY || *c == DEVOICED)) && *c != NONSYLLABIC && *c != SYLLABIC).collect();
         if !unread.is_empty() {
             add(&mut gaps.marked, format!("{tok}{unread}"));
         }
-        out.push(Segment { ipa: tok, stress: Some(if is_v { stress } else { 0 }), nasalized: (is_v && nasalized).then_some(true), breathy: (is_v && breathy).then_some(true), ..Default::default() });
+        out.push(Segment { ipa: tok, stress: Some(if is_v { stress } else { 0 }), nasalized: (is_v && nasalized).then_some(true), breathy: (is_v && breathy).then_some(true), devoiced: (is_v && devoiced).then_some(true), ..Default::default() });
         if is_v {
             stress = 0;
         }

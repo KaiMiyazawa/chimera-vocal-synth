@@ -55,6 +55,17 @@ pub struct Segment {
     /// vowel said with them part-open (IPA combining diaeresis below); None or false: modal
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breathy: Option<bool>,
+    /// a devoiced vowel (IPA ring below): the folds are held apart through it by a laryngeal
+    /// gesture of its own, not by what is left of its neighbours' (Fujimoto et al. 2002: one
+    /// opening, larger than a single consonant's); None or false: voiced
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devoiced: Option<bool>,
+    /// a vowel with no tongue, jaw or lip target of its own (the lingual gesture of a devoiced
+    /// vowel may be absent: Shaw & Kawahara 2018): it keeps its time, and the articulators pass
+    /// through it from one neighbour to the next. No IPA mark sets it; None or false: the vowel's
+    /// posture is a target
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targetless: Option<bool>,
 }
 
 impl Segment {
