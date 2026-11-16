@@ -268,7 +268,7 @@ pub struct HumanVoice {
     /// research input (empty by default): stiffening of the two-mass folds over time, as gestures
     /// for the timing and a fraction of the tension factor; the strongest active one sets
     /// `folds.stiffness` each control step (left as it is while the track is empty). Switching the
-    /// source to the two-mass folds rebuilds them, back to their defaults (`trim_loop`, `stiffness`)
+    /// source to the two-mass folds rebuilds them, back to their defaults (every research input of `TriangularGlottis`)
     pub stiffness_track: Vec<(Gesture, f64)>,
     blend: [Blended; N_CONTROL],
     base_abduction: f64,

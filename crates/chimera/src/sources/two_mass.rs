@@ -116,10 +116,13 @@ pub struct TriangularGlottis {
     /// research input (1 by default): the fraction of the extra damping in contact (`Z1_CLOSED`,
     /// `Z2_CLOSED` over the open values) that is applied
     pub contact_damping: f64,
-    /// research switches (on by default): while a mass is shut, the subglottal pressure pushes on
-    /// it (the lower one when it is shut; both when only the upper is: Steinecke & Herzel 1995).
-    /// Off, that push is left out: not a physical setting, a way to see what the push does to F0.
+    /// research switch (on by default): while the lower mass is shut, the subglottal pressure
+    /// pushes on it (Steinecke & Herzel 1995). Off, that push is left out: not a physical setting,
+    /// a way to see what the push does to F0 (see the `onset_probe` example).
     pub closed_push_lower: bool,
+    /// research switch (on by default): while only the upper mass is shut, the subglottal pressure
+    /// pushes on it as well as on the lower one. Off, only the lower one is pushed then (a
+    /// diagnosis, as `closed_push_lower`).
     pub closed_push_upper: bool,
     // pitch loop: cycle detection on the upper mass against its running mean
     x2_mean: f64,
@@ -150,6 +153,12 @@ pub struct TriangularGlottis {
     open_count: f64,
     /// last glottal area (cm²)
     pub area: f64,
+    /// research telemetry: the narrower of the two masses' channels this sample (cm², before the
+    /// closure shaping, the glottal stop and the chink), 0 while the folds are shut
+    channel: f64,
+    /// research telemetry: the force (dyn) with which the subglottal pressure pushes the lower
+    /// mass this sample because a mass is shut (the closed-phase push; 0 while both are open)
+    closed_push_force: f64,
     /// requested f0 after vibrato and drift (Hz)
     pub f0_now: f64,
     /// 0..1: how strongly the folds are vibrating
@@ -204,6 +213,8 @@ impl TriangularGlottis {
             open_quotient: 0.0,
             open_count: 0.0,
             area: 0.0,
+            channel: 0.0,
+            closed_push_force: 0.0,
             f0_now: 110.0,
             voicing: 0.0,
         }
@@ -235,18 +246,39 @@ impl TriangularGlottis {
         }
     }
 
-    /// Phase within the current cycle, 0..1 (restarts at each opening).
-    /// the upper mass's displacement from its rest (cm, telemetry): it swings with the folds and,
-    /// unlike the glottal area, carries no abduction offset, so cycles can be read from it
+    /// Research telemetry: the narrowest channel between the folds this sample (cm²; see `channel`).
+    pub fn channel_area(&self) -> f64 {
+        self.channel
+    }
+
+    /// Research telemetry: the closed-phase push on the lower mass this sample (dyn).
+    pub fn closed_push_force(&self) -> f64 {
+        self.closed_push_force
+    }
+
+    /// Research: the pitch loop's trim (log2 of its tension factor). Read after the loop has
+    /// settled and set into another run with `trim_loop` off, the folds keep that operating point.
+    pub fn trim(&self) -> f64 {
+        self.q_trim
+    }
+
+    /// Research: set the pitch loop's trim (see `trim`).
+    pub fn set_trim(&mut self, t: f64) {
+        self.q_trim = t;
+    }
+
     /// Research telemetry: the smoothed tension factor Q the masses run at (masses / Q, springs · Q).
     pub fn tension(&self) -> f64 {
         self.q_sm
     }
 
+    /// The upper mass's displacement from its rest (cm, telemetry): it swings with the folds and,
+    /// unlike the glottal area, carries no abduction offset, so cycles can be read from it.
     pub fn displacement(&self) -> f64 {
         self.x2
     }
 
+    /// Phase within the current cycle, 0..1 (restarts at each opening).
     pub fn cycle_phase(&self) -> f64 {
         js_min(1.0, self.since / js_max(1.0, self.period))
     }
@@ -326,6 +358,7 @@ impl TriangularGlottis {
             (dp * (1.0 - r * r), 0.0)
         };
         let f1 = p1 * len * D1 * size;
+        self.closed_push_force = if a1 <= eps || a2 <= eps { f1 } else { 0.0 };
         let f2 = p2 * len * D2 * size;
 
         // ---- mechanics, at tension factor Q (masses / Q, stiffnesses · Q)
@@ -392,6 +425,7 @@ impl TriangularGlottis {
         // source's closure sharpness, for the folds). Only the area the airway sees is shaped: the
         // pressures on the masses use their own areas.
         let mut am = js_max(0.0, amin);
+        self.channel = am;
         self.area_hi = js_max(self.area_hi, am);
         let closing = am < self.area_prev;
         self.area_prev = am;

@@ -472,8 +472,53 @@ mod research_inputs {
         let explicit = render("ɑpɑ", SourcePatch::default(), |v| {
             v.folds.stiffness = 0.0;
             v.folds.trim_loop = true;
+            v.folds.stiffness_keeps_gap = false;
+            v.folds.contact_stiffness = 3.0;
+            v.folds.contact_damping = 1.0;
+            v.folds.closed_push_lower = true;
+            v.folds.closed_push_upper = true;
         });
         assert_eq!(plain, explicit);
+    }
+
+    /// A small abduction held while the folds vibrate (trim loop frozen) lowers their F0: the
+    /// cycles stop closing, and with them goes the lift that the subglottal push on the shut lower
+    /// mass gives each cycle. Without that push the same opening raises F0 instead.
+    #[test]
+    fn the_push_on_the_shut_lower_mass_is_what_an_opening_takes_from_f0() {
+        use chimera::control::score::{ControlKey, Gesture, Targets};
+        use chimera::phonetics::Intonation;
+        let change = |push: bool| {
+            let mut input = tokenize_ipa("ɑ");
+            input[0].dur = Some(1.2);
+            input[0].stress = Some(0);
+            let plan = plan_utterance(&input, &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(110.0), accent: Some(0.0), intonation: Some(Intonation::Flat), ..Default::default() });
+            let mut v = HumanVoice::with_defaults(FS);
+            v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), roughness: Some(0.0), vibrato_depth: Some(0.0), drift: Some(0.0), ..Default::default() });
+            v.folds.closed_push_lower = push;
+            v.schedule(&plan.gestures);
+            v.schedule(&[Gesture::new(0.7, 1.1, 0.02, 0.02, 6.0, Targets::default().with(ControlKey::ABDUCTION, 0.03))]);
+            let mut out = [0.0f32; 1];
+            let mut x = vec![];
+            for i in 0..(1.1 * FS) as usize {
+                if i == (0.6 * FS) as usize {
+                    v.folds.trim_loop = false;
+                }
+                v.render(&mut out);
+                x.push(v.folds.displacement());
+            }
+            // mean F0 from upward crossings of the window's mean displacement
+            let f0 = |a: f64, b: f64| {
+                let w = &x[(a * FS) as usize..(b * FS) as usize];
+                let m = w.iter().sum::<f64>() / w.len() as f64;
+                let ups: Vec<usize> = (1..w.len()).filter(|&i| w[i - 1] < m && w[i] >= m).collect();
+                (ups.len() - 1) as f64 * FS / (ups[ups.len() - 1] - ups[0]) as f64
+            };
+            f0(0.85, 1.05) - f0(0.4, 0.6)
+        };
+        let (with, without) = (change(true), change(false));
+        assert!(with < -5.0, "with the push, an opening of 0.03 cm² moves F0 by {with:+.1} Hz");
+        assert!(without > 0.0, "without it, by {without:+.1} Hz");
     }
 
     /// Stiffening the folds (the trim loop off, so nothing pulls F0 back) raises F0.

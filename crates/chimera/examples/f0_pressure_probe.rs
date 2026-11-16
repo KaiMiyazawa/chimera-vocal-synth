@@ -19,28 +19,10 @@ use chimera::phonetics::planner::{PlanOptions, plan_utterance};
 use chimera::physics::CM_H2O;
 use chimera::voice::human_voice::{GlottisModel, HumanVoice, SourcePatch};
 
-const FS: f64 = 48000.0;
+#[path = "common/peaks.rs"]
+mod peaks;
 
-/// Peak times of `y` (cycle_check's reader).
-fn peaks(y: &[f64], half: usize, min_prominence: f64) -> Vec<f64> {
-    let n = y.len();
-    let mut out = vec![];
-    let mut last: Option<usize> = None;
-    for i in half..n.saturating_sub(half) {
-        let w = &y[i - half..=i + half];
-        if w.iter().all(|&v| v <= y[i]) && w.iter().filter(|&&v| v == y[i]).count() == 1 {
-            let lo = last.map_or(&y[i.saturating_sub(4 * half)..i], |j| &y[j..i]).iter().cloned().fold(f64::MAX, f64::min);
-            if y[i] - lo >= min_prominence {
-                let (a, b, c) = (y[i - 1], y[i], y[i + 1]);
-                let den = a - 2.0 * b + c;
-                let off = if den.abs() > 1e-18 { 0.5 * (a - c) / den } else { 0.0 };
-                out.push((i as f64 + off) / FS);
-                last = Some(i);
-            }
-        }
-    }
-    out
-}
+const FS: f64 = 48000.0;
 
 fn run(model: GlottisModel, f0: f64, p_after: f64, lower_push: bool) -> (f64, f64, f64, f64) {
     let mut input = tokenize_ipa("ɑ");
@@ -68,7 +50,7 @@ fn run(model: GlottisModel, f0: f64, p_after: f64, lower_push: bool) -> (f64, f6
         dp.push((v.airway.net.p[sub] - v.airway.net.p[supra]) / CM_H2O);
     }
     let t: Vec<f64> = if model == GlottisModel::TwoMass {
-        peaks(&x, (0.0025 * FS) as usize, 0.002)
+        peaks::peaks(&x, FS, (0.0025 * FS) as usize, 0.002).into_iter().map(|p| p.1).collect()
     } else {
         // the pulse's phase wraps from 1 to 0 once per cycle
         (1..n).filter(|&i| x[i] < x[i - 1] - 0.5).map(|i| i as f64 / FS).collect()
