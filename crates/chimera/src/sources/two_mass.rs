@@ -215,6 +215,12 @@ impl TriangularGlottis {
     }
 
     /// Phase within the current cycle, 0..1 (restarts at each opening).
+    /// the upper mass's displacement from its rest (cm, telemetry): it swings with the folds and,
+    /// unlike the glottal area, carries no abduction offset, so cycles can be read from it
+    pub fn displacement(&self) -> f64 {
+        self.x2
+    }
+
     pub fn cycle_phase(&self) -> f64 {
         js_min(1.0, self.since / js_max(1.0, self.period))
     }

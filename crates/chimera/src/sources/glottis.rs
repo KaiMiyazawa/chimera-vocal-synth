@@ -162,6 +162,12 @@ impl ParametricGlottis {
     pub fn static_abduction(&self) -> f64 {
         self.static_sm
     }
+    /// the cycle's phase (0..1, telemetry): it wraps once per glottal cycle, so it marks the true
+    /// cycle boundaries of the pulse
+    pub fn phase(&self) -> f64 {
+        self.phase
+    }
+
     /// the smoothed transglottal pressure (dyn/cm²) the voicing gate reads (telemetry)
     pub fn transglottal_pressure(&self) -> f64 {
         self.dp_sm
