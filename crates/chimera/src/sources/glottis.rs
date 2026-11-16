@@ -6,11 +6,12 @@
 //! Voicing is gated physiologically:
 //!  - transglottal pressure must exceed the phonation threshold (≈2–3 cmH₂O),
 //!  - wide abduction (voiceless consonants, /h/) stops vibration. With `threshold_area` set (the
-//!    human voice), it does so through the threshold: above that opening the threshold pressure
-//!    rises in proportion to it (Titze 1988's small-amplitude result, P_th = k_t·B·ξ₀/2τ, linear
-//!    in the prephonatory half-width ξ₀ above the optimum; Lucero 1996), so whether the folds stop
-//!    depends on the transglottal pressure too, and an obstruent's oral pressure stops them at a
-//!    smaller opening. Without it (the creatures), an opening above 0.08–0.22 cm² stops them.
+//!    human voice), it does so through the pressures: a wide glottis passes more air, so the
+//!    transglottal pressure the network computes falls (in /h/ to about 2 cmH₂O, under a fricative
+//!    or stop closure to 0–2), and above that opening the threshold also rises linearly with it
+//!    (`threshold_slope`; the threshold grows with the prephonatory half-width and does not fall to
+//!    zero as it narrows: Titze 1988, Lucero 1996, Chan & Titze 2006). Without it (the creatures),
+//!    an opening above 0.08–0.22 cm² stops them.
 
 use crate::math::{Drift, PI, Rng, TAU, clamp, cos, exp, js_max, js_min, pow, sin, smoothstep};
 use crate::physics::CM_H2O;
@@ -51,10 +52,12 @@ pub struct GlottisParams {
     /// bifurcation 0..1: a logistic map drives per-cycle period and amplitude. Rising values walk
     /// through period doubling (subharmonics, ~0.3), period four (~0.55) into deterministic chaos (>0.62).
     pub chaos: f64,
-    /// membranous opening (cm²) above which the phonation threshold rises in proportion to the
-    /// opening (see the module notes); 0: the threshold is fixed and an opening of 0.08–0.22 cm²
-    /// stops the folds instead
+    /// membranous opening (cm²) above which the phonation threshold rises with the opening (see
+    /// the module notes); 0: the threshold is fixed and an opening of 0.08–0.22 cm² stops the folds
+    /// instead
     pub threshold_area: f64,
+    /// how fast the threshold rises above `threshold_area` (dyn/cm² per cm² of opening)
+    pub threshold_slope: f64,
 }
 
 pub const DEFAULT_GLOTTIS: GlottisParams = GlottisParams {
@@ -76,6 +79,7 @@ pub const DEFAULT_GLOTTIS: GlottisParams = GlottisParams {
     closure: 0.0,
     chaos: 0.0,
     threshold_area: 0.0,
+    threshold_slope: 0.0,
 };
 
 #[derive(Clone, Debug)]
@@ -157,6 +161,10 @@ impl ParametricGlottis {
     pub fn static_abduction(&self) -> f64 {
         self.static_sm
     }
+    /// the smoothed transglottal pressure (dyn/cm²) the voicing gate reads (telemetry)
+    pub fn transglottal_pressure(&self) -> f64 {
+        self.dp_sm
+    }
 
     /// Reset phase etc.
     pub fn reset(&mut self) {
@@ -194,7 +202,7 @@ impl ParametricGlottis {
         // voicing gate: pressure above threshold, adduction sufficient, not forcibly closed
         let open = js_max(0.0, self.static_sm - p.chink);
         let (threshold, adduct_gate) = if p.threshold_area > 0.0 {
-            (self.threshold * js_max(1.0, open / p.threshold_area), 1.0)
+            (self.threshold + p.threshold_slope * js_max(0.0, open - p.threshold_area), 1.0)
         } else {
             (self.threshold, 1.0 - smoothstep(0.08, 0.22, open))
         };

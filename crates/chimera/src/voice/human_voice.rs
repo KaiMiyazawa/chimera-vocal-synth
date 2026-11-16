@@ -52,6 +52,12 @@ fn default_brightness() -> f64 {
 /// threshold stays at its modal value; Lucero's rise toward zero width (viscous losses) is not
 /// modelled, because the source's static opening is not a prephonatory width at modal voice.
 const THRESHOLD_AREA: f64 = 0.045;
+/// how fast the threshold rises above `THRESHOLD_AREA` (cmH₂O per cm² of opening): 0.22 kPa per mm
+/// of half-width for a 1.4 cm fold, within the span physical models of the mucosa give (Chan,
+/// Titze & Titze 1997). Set inside the engine's own bounds: a breathy vowel (0.10 cm², about
+/// 5.2 cmH₂O across the glottis) keeps voicing, and /h/ and the voiceless fricatives (0.30–0.33
+/// cm², 0.5–2.2 cmH₂O across it) stop it.
+const THRESHOLD_SLOPE: f64 = 8.0;
 
 pub const DEFAULT_SOURCE: VoiceSource = VoiceSource { f0: 110.0, glide: 0.06, pressure: 8.0, breathiness: 0.15, tension: 0.5, fry: 0.0, roughness: 0.1, vibrato_depth: 0.0, vibrato_rate: 6.0, drift: 5.0, voiced: true, brightness: 0.25 };
 
@@ -334,6 +340,7 @@ impl HumanVoice {
         // air and damps the tract, which lifts H1 and the band below 500 Hz.
         g.chink = (0.008 + 0.03 * s.breathiness) * k2;
         g.threshold_area = THRESHOLD_AREA * k2;
+        g.threshold_slope = THRESHOLD_SLOPE * CM_H2O / k2;
         g.open_quotient = 0.78 - 0.36 * s.tension;
         // The folds close along their length and depth over a return phase, not all at once, so
         // a sung or spoken voice closes softly (0.22 at tension 0.55): an abrupt closure put

@@ -156,3 +156,21 @@ fn a_targetless_rhotic_vowel_does_not_pre_place_a_closure() {
     assert!((t0(&bare_rhotic) - start_of(&bare_rhotic)).abs() < 1e-9);
     assert!((t0(&plain_vowel) - start_of(&plain_vowel)).abs() < 1e-9);
 }
+
+/// Bug (ea59a5a): a threshold rising in proportion to the opening silenced breathy vowels (their
+/// 0.1 cm² opening, between voiced consonants, left the gate at 0.06). The opening-dependent
+/// threshold must keep breathy voice and stop the folds for /h/ and voiceless obstruents.
+#[test]
+fn the_opening_dependent_threshold_keeps_breathy_voice_and_stops_voiceless_sounds() {
+    let mid = |ipa: &str| voicing(&plan(&tokenize_ipa(ipa)), 1);
+    // the bars are the area-cutoff engine's own values (71381df: 1.00, 0.93, 0.67; /ɦ/ is short,
+    // so its mean includes the transitions into and out of it)
+    for (ipa, what, at_least) in [("ˈbada", "modal /a/", 0.95), ("ˈba\u{324}da", "breathy /a/", 0.9), ("ˈbɦada", "/ɦ/", 0.6)] {
+        let g = mid(ipa);
+        assert!(g > at_least, "{what} in {ipa}: voicing {g:.2}");
+    }
+    for (ipa, what) in [("ˈaha", "/h/"), ("ˈasa", "/s/"), ("ˈaɸa", "/ɸ/"), ("ˈaɕa", "/ɕ/"), ("ˈapa", "/p/")] {
+        let g = mid(ipa);
+        assert!(g < 0.1, "{what} in {ipa}: voicing {g:.2}");
+    }
+}
