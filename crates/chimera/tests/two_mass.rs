@@ -385,3 +385,120 @@ fn voicing_reads_full_at_high_pitch() {
         assert!(v.voicing() > 0.7, "{} at {f0} Hz: voicing {:.2}", body.name, v.voicing());
     }
 }
+
+mod research_inputs {
+    use chimera::phonetics::ipa::tokenize_ipa;
+    use chimera::phonetics::planner::{PlanOptions, plan_utterance};
+    use chimera::voice::human_voice::{GlottisModel, HumanVoice, SourcePatch};
+
+    const FS: f64 = 48000.0;
+
+    fn render(ipa: &str, patch: SourcePatch, setup: impl Fn(&mut HumanVoice)) -> Vec<f32> {
+        let plan = plan_utterance(&tokenize_ipa(ipa), &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(110.0), ..Default::default() });
+        let mut v = HumanVoice::with_defaults(FS);
+        v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), ..patch });
+        setup(&mut v);
+        v.schedule(&plan.gestures);
+        let mut out = vec![0.0f32; (FS * (plan.end + 0.1)) as usize];
+        for c in out.chunks_mut(128) {
+            v.render(c);
+        }
+        out
+    }
+
+    fn rms(x: &[f32]) -> f64 {
+        (x.iter().map(|&y| (y as f64) * (y as f64)).sum::<f64>() / x.len() as f64).sqrt()
+    }
+
+    /// Bug (upstream review of PR 103): the breathiness setting parted the folds along their length,
+    /// so breathy 1.0 whispered (voicing 0.00, 8 dB below the default breathiness). Only abduction
+    /// beyond the voice's own parts them now: breathy 1.0 voices about as much as the default.
+    #[test]
+    fn a_breathy_voice_stays_voiced_with_the_folds() {
+        let voicing = |breathiness: f64| {
+            let plan = plan_utterance(&tokenize_ipa("ɑ"), &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(110.0), ..Default::default() });
+            let mut v = HumanVoice::with_defaults(FS);
+            v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), breathiness: Some(breathiness), ..Default::default() });
+            v.schedule(&plan.gestures);
+            let mut out = vec![0.0f32; 128];
+            let mut vs = vec![];
+            for k in 0..((FS * 0.6) as usize / 128) {
+                v.render(&mut out);
+                if k > 112 {
+                    vs.push(v.voicing());
+                }
+            }
+            vs.iter().sum::<f64>() / vs.len() as f64
+        };
+        let (modal, breathy) = (voicing(0.15), voicing(1.0));
+        assert!(breathy > 0.8 * modal, "breathy 1.0 with the folds: voicing {breathy:.2}, default {modal:.2}");
+    }
+
+    /// Bug (upstream review of PR 103): a glottal stop did not stop the folds (they got louder).
+    #[test]
+    fn a_glottal_stop_silences_the_folds() {
+        let out = render("ɑʔɑ", SourcePatch::default(), |_| {});
+        let plan = plan_utterance(&tokenize_ipa("ɑʔɑ"), &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(110.0), ..Default::default() });
+        let s = &plan.segments[1];
+        let cut = |a: f64, b: f64| &out[(a * FS) as usize..(b * FS) as usize];
+        let mid = 0.5 * (s.t0 + s.t1);
+        let stop = rms(cut(mid - 0.01, mid + 0.01));
+        let vowel = rms(cut(plan.segments[0].t0 + 0.05, plan.segments[0].t1 - 0.03));
+        assert!(stop < 0.2 * vowel, "ʔ with the folds: {stop:.2e} against the vowel's {vowel:.2e}");
+    }
+
+    /// Bug (upstream review of PR 103): the press read the vowel targets' larynx heights, so the
+    /// folds' setting changed vowel by vowel.
+    #[test]
+    fn the_folds_are_pressed_alike_for_every_vowel() {
+        let rest = |ipa: &str| {
+            let plan = plan_utterance(&tokenize_ipa(ipa), &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(110.0), ..Default::default() });
+            let mut v = HumanVoice::with_defaults(FS);
+            v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), ..Default::default() });
+            v.schedule(&plan.gestures);
+            let mut out = vec![0.0f32; 128];
+            for _ in 0..((0.25 * FS) as usize / 128) {
+                v.render(&mut out);
+            }
+            v.folds.folds.rest
+        };
+        assert_eq!(rest("i"), rest("ɑ"));
+    }
+
+    /// The research inputs at their defaults leave the folds as they were, sample for sample.
+    #[test]
+    fn the_research_inputs_at_their_defaults_change_nothing() {
+        let plain = render("ɑpɑ", SourcePatch::default(), |_| {});
+        let explicit = render("ɑpɑ", SourcePatch::default(), |v| {
+            v.folds.stiffness = 0.0;
+            v.folds.trim_loop = true;
+        });
+        assert_eq!(plain, explicit);
+    }
+
+    /// Stiffening the folds (the trim loop off, so nothing pulls F0 back) raises F0.
+    #[test]
+    fn stiffer_folds_vibrate_faster() {
+        let cycles = |stiff: f64| {
+            let plan = plan_utterance(&tokenize_ipa("ɑ"), &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(110.0), ..Default::default() });
+            let mut v = HumanVoice::with_defaults(FS);
+            v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), ..Default::default() });
+            v.folds.trim_loop = false;
+            v.folds.stiffness = stiff;
+            v.schedule(&plan.gestures);
+            let mut out = [0.0f32; 1];
+            let (mut ups, mut last) = (0, 0.0);
+            for i in 0..(0.6 * FS) as usize {
+                v.render(&mut out);
+                let a = v.folds.area;
+                if i as f64 > 0.3 * FS && last < 0.05 && a >= 0.05 {
+                    ups += 1;
+                }
+                last = a;
+            }
+            ups
+        };
+        let (soft, stiff) = (cycles(0.0), cycles(0.3));
+        assert!(stiff > soft, "cycles in 0.3 s: {soft} at stiffness 0, {stiff} at 0.3");
+    }
+}

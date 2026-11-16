@@ -267,7 +267,8 @@ pub struct HumanVoice {
     pub clock: f64,
     /// research input (empty by default): stiffening of the two-mass folds over time, as gestures
     /// for the timing and a fraction of the tension factor; the strongest active one sets
-    /// `folds.stiffness` each control step
+    /// `folds.stiffness` each control step (left as it is while the track is empty). Switching the
+    /// source to the two-mass folds rebuilds them, back to their defaults (`trim_loop`, `stiffness`)
     pub stiffness_track: Vec<(Gesture, f64)>,
     blend: [Blended; N_CONTROL],
     base_abduction: f64,
@@ -395,6 +396,7 @@ impl HumanVoice {
     /// Cancel scheduled gestures (speech stops; the voice returns to the performer's posture).
     pub fn cancel_score(&mut self) {
         self.score.clear();
+        self.stiffness_track.clear();
     }
 
     /// breath/voice on (1) or off (0); intermediate values scale the pressure
@@ -664,7 +666,10 @@ impl HumanVoice {
         // a raised larynx presses the folds together (Laver's "raised larynx voice"; Sundberg &
         // Askenfelt 1983, Shipp 1987): above LARYNX_PRESS_FROM cm the rest gap closes, fully by
         // LARYNX_PRESS_FULL; a lowered larynx slackens them a little
-        let lar = self.artic.x.larynx;
+        // the performer's larynx setting, not the score's vowel targets: the vowel table's fitted
+        // larynx heights would otherwise press the folds vowel by vowel
+        let lar = self.artic.target.larynx;
+        self.folds.abduction_base = self.base_abduction;
         let press = clamp((lar - LARYNX_PRESS_FROM) / (LARYNX_PRESS_FULL - LARYNX_PRESS_FROM), 0.0, 1.0)
             - 0.3 * clamp((-lar - LARYNX_PRESS_FROM) / (LARYNX_PRESS_FULL - LARYNX_PRESS_FROM), 0.0, 1.0);
         self.folds.folds.rest = self.base_rest - LARYNX_PRESS * press;

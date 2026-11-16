@@ -15,7 +15,8 @@
 //!    linearly from the anterior commissure to the vocal processes. Vibration rides on that
 //!    triangle: a partly abducted glottis closes in front and leaks behind, as breathy voice does.
 //!  - **Pitch** sets the folds' stiffness and mass by Ishizaka & Flanagan's tension factor Q. The
-//!    folds' own frequency also moves with pressure and adduction, so a slow loop trims Q until
+//!    folds' own frequency also moves with pressure and adduction, so a loop trims Q (by 35 % of the error, in octaves, each clear cycle: a time constant of two to
+//!    three cycles) until
 //!    the measured cycle rate matches the requested f0 (a singer listening to their own pitch).
 //!
 //! Real-time contract: no allocation, transcendental math through `chimera::math`, one state
@@ -55,6 +56,8 @@ const WHISPER_REST: f64 = 0.1;
 const ABDUCT_REST: f64 = 0.5;
 /// deepest the folds can be pressed into each other at rest (cm, half-overlap, at Q ≤ 1)
 const MAX_PRESS: f64 = 0.016;
+/// how far a full glottal stop (closure 1) presses the folds past that knee (cm, at Q ≤ 1)
+const GLOTTAL_STOP_PRESS: f64 = 0.12;
 
 /// Folds' setting, per voice, beyond what [`GlottisParams`] carries.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -98,6 +101,10 @@ pub struct TriangularGlottis {
     /// factor Q (cricothyroid activity, as during voiceless obstruents: Halle & Stevens's [stiff
     /// vocal folds]). F0 and whether the folds can vibrate then follow from the mechanics.
     pub stiffness: f64,
+    /// the voice's own static abduction (cm², its breathiness), set by the voice each control
+    /// step: only abduction beyond it (a consonant's, /h/'s) parts the folds along their length,
+    /// so a breathy voice stays a voice and does not turn into a whisper
+    pub abduction_base: f64,
     // pitch loop: cycle detection on the upper mass against its running mean
     x2_mean: f64,
     mean_coef: f64,
@@ -152,6 +159,7 @@ impl TriangularGlottis {
             q_trim: 0.0,
             trim_loop: true,
             stiffness: 0.0,
+            abduction_base: 0.0,
             x2_mean: 0.0,
             mean_coef: 1.0 - exp(-TAU * 15.0 / fs),
             armed: false,
@@ -247,7 +255,7 @@ impl TriangularGlottis {
         // opening the posterior triangle (as VocalTractLab's rest displacements do for voiceless
         // sounds). Without it a whisper at a firm breath vibrated fully (pressure 15 cmH2O).
         let parted = if p.amplitude > 0.0 { 0.0 } else { WHISPER_REST };
-        self.rest_sm += sc * (self.folds.rest - 0.12 * p.closure + parted + ABDUCT_REST * p.abduction / len - self.rest_sm);
+        self.rest_sm += sc * (self.folds.rest + parted + ABDUCT_REST * js_max(0.0, p.abduction - self.abduction_base) / len - self.rest_sm);
         // abduction (cm²) opens the posterior end: a triangle of that area, apex at the commissure
         self.post_sm += sc * (p.abduction / len - self.post_sm);
         self.chink_sm += sc * (p.chink - self.chink_sm);
@@ -264,7 +272,8 @@ impl TriangularGlottis {
         self.gap_scale = gap_scale;
         // pressing saturates (a tanh knee at MAX_PRESS): overlap beyond it would hold the folds shut
         // at speaking pressures, a silence no singer produces by pressing (they push harder)
-        let rest = if self.rest_sm < 0.0 { -MAX_PRESS * tanh(-self.rest_sm / MAX_PRESS) } else { self.rest_sm };
+        // a glottal stop presses beyond that knee: it holds the folds shut, as the pulse does
+        let rest = (if self.rest_sm < 0.0 { -MAX_PRESS * tanh(-self.rest_sm / MAX_PRESS) } else { self.rest_sm }) - GLOTTAL_STOP_PRESS * self.closure_sm;
         let r2 = rest * gap_scale;
         let r1 = r2 + CONVERGENCE * gap_scale;
 
@@ -360,7 +369,7 @@ impl TriangularGlottis {
             let peak = js_max(self.area_peak, 1e-4);
             am = if am < peak { peak * pow(am / peak, g) } else { am };
         }
-        let a = am + self.chink_sm * (1.0 - 0.92 * self.closure_sm);
+        let a = am * (1.0 - self.closure_sm) + self.chink_sm * (1.0 - 0.92 * self.closure_sm);
         self.area = a;
         a
     }
@@ -382,10 +391,12 @@ impl TriangularGlottis {
         self.since = 0.0;
         let f = self.fs / js_max(1.0, period);
         // only a real oscillation (a clear swing, a plausible rate) steers the pitch
-        if self.trim_loop && self.swing > 0.004 && f > 25.0 && f < 2500.0 {
+        if self.swing > 0.004 && f > 25.0 && f < 2500.0 {
             self.period = period;
-            let err = log2(f0 / f);
-            self.q_trim = clamp(self.q_trim + 0.35 * err, -2.0, 2.0);
+            if self.trim_loop {
+                let err = log2(f0 / f);
+                self.q_trim = clamp(self.q_trim + 0.35 * err, -2.0, 2.0);
+            }
         }
         // jitter: each cycle's stiffness varies a little, so its period does
         self.cycle_q = clamp(1.0 + jitter * self.rng.gauss(), 0.8, 1.25);
