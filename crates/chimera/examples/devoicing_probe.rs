@@ -3,8 +3,11 @@
 //!
 //! Each word is said in a frame, `e` + word + `to`, with no stress. The target is the word's first
 //! vowel; its nominal duration is set directly (40–200 ms). Conditions, crossed:
-//! - `glottis`: `cutoff` (the engine's default: an opening of 0.08–0.22 cm² stops the folds) or
-//!   `threshold` (the research option: a phonation threshold rising with the opening).
+//! - `glottis`: `cutoff` (the engine's default: an opening of 0.08–0.22 cm² stops the folds),
+//!   `threshold` (the research option: a phonation threshold rising with the opening), or `folds`
+//!   (the self-oscillating two-mass folds, pitch loop on: whether they vibrate follows from their
+//!   mechanics; `gate` is then their voicing measure and `p_gate` is not defined, 0). Chosen with
+//!   `PROBE_GLOTTIS`, a comma list (default `cutoff,threshold`, the runs before the folds).
 //! - `vot`: the word's voiceless stops unaspirated (`˭`) or aspirated with a nominal voice onset
 //!   time (`Segment::vot`; the engine's ramps add to it, so it is a setting, not a measurement).
 //! - `adv`: the following voiceless consonant's glottal opening starts this much earlier (ms):
@@ -36,7 +39,7 @@ use chimera::control::score::{ControlKey, Gesture, Targets, activation};
 use chimera::phonetics::ipa::tokenize_ipa;
 use chimera::phonetics::planner::{PlanOptions, is_vowel, plan_utterance};
 use chimera::physics::CM_H2O;
-use chimera::voice::human_voice::HumanVoice;
+use chimera::voice::human_voice::{GlottisModel, HumanVoice, SourcePatch};
 
 const FS: f64 = 48000.0;
 const BLOCK: usize = 64;
@@ -48,6 +51,7 @@ const OPENINGS: [&str; 2] = ["aspiration", "voiceless"];
 #[derive(Clone, Copy)]
 struct Cond {
     threshold: bool,
+    folds: bool,
     vot: Option<f64>,
     adv: f64,
     peak: Option<f64>,
@@ -119,6 +123,9 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
     let g1 = dominant(&plan.gestures, &c1.ipa, c1.t0, c1.t1).cloned();
     let mut v = HumanVoice::with_defaults(FS);
     v.set_opening_threshold(c.threshold);
+    if c.folds {
+        v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), ..Default::default() });
+    }
     v.schedule(&plan.gestures);
     let n = (FS * (plan.end + 0.1)).round() as usize;
     let mut out = vec![0.0f32; n];
@@ -141,7 +148,7 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
         let shut = f.grid.iter().map(|g| g.area).fold(f64::MAX, f64::min) < 0.01;
         let released = g0.as_ref().is_none_or(|g| activation(g, t) < 0.5);
         let not_closing = g1.as_ref().is_none_or(|g| activation(g, t) < 0.5);
-        blocks.push(B { t, open: released && not_closing && !shut, gate: v.glottis.voicing, p_gate: v.glottis.pressure_gate, ps: v.airway.net.p[sub] / CM_H2O, pg: v.airway.net.p[supra] / CM_H2O, abd: v.glottis.static_abduction(), tb_y: v.artic.x.get(ArticKey::TbY) });
+        blocks.push(B { t, open: released && not_closing && !shut, gate: v.voicing(), p_gate: if c.folds { 0.0 } else { v.glottis.pressure_gate }, ps: v.airway.net.p[sub] / CM_H2O, pg: v.airway.net.p[supra] / CM_H2O, abd: v.glottis.static_abduction(), tb_y: v.artic.x.get(ArticKey::TbY) });
     }
     // the open run around the vowel: the longest run of open blocks that overlaps [t0, t1]
     let mut best: Option<(usize, usize)> = None;
@@ -206,16 +213,19 @@ fn main() {
     let peaked = ["kita", "kɯta", "kɯɕa"];
     let durs: Vec<f64> = if quick { vec![0.06, 0.1, 0.16] } else { (4..=20).map(|d| d as f64 * 0.01).collect() };
     let vots = [None, Some(0.03), Some(0.05)];
+    let glottises: Vec<String> = std::env::var("PROBE_GLOTTIS").unwrap_or_else(|_| "cutoff,threshold".into()).split(',').map(|g| g.trim().to_string()).collect();
+    assert!(glottises.iter().all(|g| ["cutoff", "threshold", "folds"].contains(&g.as_str())), "PROBE_GLOTTIS: cutoff, threshold, folds");
     let rev = std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
     let dirty = std::process::Command::new("git").args(["status", "--porcelain", "--untracked-files=no"]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
     println!("# devoicing_probe at {}{}", rev.trim(), if dirty { " (uncommitted changes)" } else { "" });
-    println!("# male, f0 {F0} Hz, Breath 8 cmH2O, frame e_X_to, no stress, fs {FS}; glottis cutoff = engine default, threshold = research option (8 cmH2O/cm2 above 0.045 cm2); peak strength 2");
+    println!("# male, f0 {F0} Hz, Breath 8 cmH2O, frame e_X_to, no stress, fs {FS}; glottis cutoff = engine default, threshold = research option (8 cmH2O/cm2 above 0.045 cm2), folds = two-mass; peak strength 2");
     println!("block\tword\tgroup\tglottis\tvot\tadv_ms\tlarynx\ttongue\tnominal_ms\topen_ms\tvoiced\tgate\tp_gate\tps\tpg\tdp\tabd\ttb_y");
     let rows: Vec<Vec<String>> = std::thread::scope(|sc| {
         let handles: Vec<_> = words
             .iter()
-            .flat_map(|&(w, grp)| [false, true].map(move |th| (w, grp, th)))
-            .map(|(w, grp, threshold)| {
+            .flat_map(|&(w, grp)| glottises.iter().map(move |g| (w, grp, g.as_str())))
+            .map(|(w, grp, glottis)| {
+                let (threshold, folds) = (glottis == "threshold", glottis == "folds");
                 let durs = &durs;
                 sc.spawn(move || {
                     let mut lines = vec![];
@@ -226,7 +236,7 @@ fn main() {
                         let voiced = r.voiced.map_or(String::new(), |x| format!("{x:.3}"));
                         lines.push(format!(
                             "{block}\t{w}\t{grp}\t{}\t{vot_s}\t{:.0}\t{lar}\t{}\t{:.0}\t{:.1}\t{voiced}\t{:.3}\t{:.3}\t{:.2}\t{:.2}\t{:.2}\t{:.3}\t{:.3}",
-                            if c.threshold { "threshold" } else { "cutoff" },
+                            glottis,
                             c.adv * 1000.0,
                             if c.tongue_none { "none" } else { "target" },
                             c.dur * 1000.0, r.open_ms, r.gate, r.p_gate, r.ps, r.pg, r.ps - r.pg, r.abd, r.tb_y
@@ -236,14 +246,14 @@ fn main() {
                         for adv in [0.0, 0.02, 0.04, 0.06] {
                             for tongue_none in [false, true] {
                                 for &dur in durs {
-                                    emit("main", Cond { threshold, vot, adv, peak: None, tongue_none, dur });
+                                    emit("main", Cond { threshold, folds, vot, adv, peak: None, tongue_none, dur });
                                 }
                             }
                         }
                         if peaked.contains(&w) {
                             for size in [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4] {
                                 for &dur in durs {
-                                    emit("peak", Cond { threshold, vot, adv: 0.0, peak: Some(size), tongue_none: false, dur });
+                                    emit("peak", Cond { threshold, folds, vot, adv: 0.0, peak: Some(size), tongue_none: false, dur });
                                 }
                             }
                         }
