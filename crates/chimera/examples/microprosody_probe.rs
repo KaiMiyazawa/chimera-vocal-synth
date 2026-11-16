@@ -53,7 +53,23 @@ enum Src {
 }
 
 /// Mean F0 change per window after the release, and the first voiced cycle's delay (ms).
+/// Stiffening (research): `amount` of the tension factor, from the consonant's oral closure (its
+/// segment start) to its release (its end), decaying over `tau` after it; or, `glottal`, on the
+/// consonant's own glottal-opening gesture with the same decay. None: no stiffening.
+#[derive(Clone, Copy)]
+struct Stiff {
+    amount: f64,
+    tau: f64,
+    glottal: bool,
+}
+
 fn measure(ipa: &str, aspirated: Option<bool>, src: Src, offset: f64) -> (Vec<Option<f64>>, f64) {
+    let (w, d, _) = measure_with(ipa, aspirated, src, offset, None);
+    (w, d)
+}
+
+/// As `measure`, with stiffening; also returns the mean stiffening input in each window.
+fn measure_with(ipa: &str, aspirated: Option<bool>, src: Src, offset: f64, stiff: Option<Stiff>) -> (Vec<Option<f64>>, f64, Vec<f64>) {
     let mut input = tokenize_ipa(ipa);
     input[0].dur = Some(0.5);
     for s in input.iter_mut() {
@@ -68,6 +84,21 @@ fn measure(ipa: &str, aspirated: Option<bool>, src: Src, offset: f64) -> (Vec<Op
     let model = if src == Src::Pulse { GlottisModel::Parametric } else { GlottisModel::TwoMass };
     v.set_source(&SourcePatch { glottis: Some(model), roughness: Some(0.0), vibrato_depth: Some(0.0), drift: Some(0.0), ..Default::default() });
     v.schedule(&plan.gestures);
+    let mut track: Vec<(chimera::control::score::Gesture, f64)> = vec![];
+    if let Some(st) = stiff {
+        use chimera::control::score::{Gesture, Targets};
+        if st.glottal {
+            for g in plan.gestures.iter().filter(|g| g.label.as_ref().is_some_and(|l| ["aspiration", "voiceless", "h"].contains(&l.as_str())) && g.t0 < c.t1 && g.t1 > c.t0) {
+                let mut x = g.clone();
+                x.ramp_out = 3.0 * st.tau;
+                track.push((x, st.amount));
+            }
+        } else {
+            track.push((Gesture::new(c.t0, c.t1, 0.03, 3.0 * st.tau, 1.0, Targets::default()), st.amount));
+        }
+        v.stiffness_track = track.clone();
+        v.folds.stiffness_keeps_gap = true;
+    }
     let n = (FS * (plan.end + 0.05)) as usize;
     let freeze = ((c.t0 - 0.1) * FS) as usize;
     let mut out = [0.0f32; 1];
@@ -90,7 +121,14 @@ fn measure(ipa: &str, aspirated: Option<bool>, src: Src, offset: f64) -> (Vec<Op
     let first = cyc.iter().find(|x| x.0 >= c.t1 - 0.005).copied();
     let delay = first.map_or(f64::NAN, |x| (x.0 - 0.5 / x.1 - c.t1) * 1000.0);
     let onset = first.map_or(f64::NAN, |x| x.0 - 0.5 / x.1);
-    (WINDOWS.iter().map(|&(a, b)| mean(onset + a, onset + b).map(|f| f - reference)).collect(), delay)
+    let input = |a: f64, b: f64| {
+        let k = 20;
+        (0..k).map(|j| {
+            let t = a + (b - a) * (j as f64 + 0.5) / k as f64;
+            track.iter().map(|(g, s)| chimera::control::score::activation(g, t) * s).fold(0.0, f64::max)
+        }).sum::<f64>() / k as f64
+    };
+    (WINDOWS.iter().map(|&(a, b)| mean(onset + a, onset + b).map(|f| f - reference)).collect(), delay, WINDOWS.iter().map(|&(a, b)| if onset.is_finite() { input(onset + a, onset + b) } else { f64::NAN }).collect())
 }
 
 fn main() {
@@ -113,6 +151,10 @@ fn main() {
         ("aza", "z", None),
         ("ama", "m", None),
     ];
+    if std::env::args().any(|a| a == "--stiffness") {
+        stiffness_table(&items);
+        return;
+    }
     let rev = std::process::Command::new("git").args(["describe", "--always", "--dirty"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
     println!("# microprosody_probe at {}", rev.trim());
     println!("# male, F0 {F0} Hz flat, roughness/drift/vibrato 0, lead /a/ 0.5 s, frozen loop 0.1 s before the consonant; 10 start offsets; mean [min,max] Hz vs the 100 ms ending 60 ms before the consonant");
@@ -143,6 +185,50 @@ fn main() {
                 })
             })
             .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for l in lines {
+        println!("{l}");
+    }
+}
+
+/// Stiffening sweep on the folds with the loop frozen. Each cell: the F0 change against the same
+/// item without stiffening, less what the input alone predicts (the reference F0 times the mean
+/// stiffening in the window): what the mechanics add beyond the input. Mean over ten offsets.
+fn stiffness_table(items: &[(&str, &str, Option<bool>)]) {
+    println!("# stiffening, folds with the loop frozen; cells: dF0 vs no stiffening (Hz) | residual beyond the input (Hz); windows from the voicing onset");
+    println!("anchor\tamount\ttau_ms\titem\tC\tdelay_ms\t0-10ms\t10-20ms\t20-30ms\t30-40ms\t40-60ms");
+    let mut jobs = vec![];
+    for glottal in [false, true] {
+        for amount in [0.1, 0.2] {
+            for tau in [0.01, 0.02, 0.04] {
+                for &(w, c, a) in items.iter().filter(|x| !["b", "d", "g", "z", "m"].contains(&x.1)) {
+                    jobs.push((glottal, amount, tau, w, c, a));
+                }
+            }
+        }
+    }
+    let lines: Vec<String> = std::thread::scope(|sc| {
+        let hs: Vec<_> = jobs.iter().map(|&(glottal, amount, tau, w, c, a)| sc.spawn(move || {
+            let mut cells = vec![(0.0, 0.0, 0usize); WINDOWS.len()];
+            let mut delay = 0.0;
+            for o in 0..10 {
+                let off = o as f64 * 0.001;
+                let (base, _, _) = measure_with(w, a, Src::Frozen, off, None);
+                let (st, d, inp) = measure_with(w, a, Src::Frozen, off, Some(Stiff { amount, tau, glottal }));
+                delay += d / 10.0;
+                for k in 0..WINDOWS.len() {
+                    if let (Some(x), Some(y)) = (st[k], base[k]) {
+                        let df = x - y;
+                        cells[k].0 += df;
+                        cells[k].1 += df - F0 * inp[k];
+                        cells[k].2 += 1;
+                    }
+                }
+            }
+            let cell = |k: usize| if cells[k].2 == 0 { "-".to_string() } else { format!("{:+.1}|{:+.1}", cells[k].0 / cells[k].2 as f64, cells[k].1 / cells[k].2 as f64) };
+            format!("{}\t{amount}\t{:.0}\t{w}\t{c}\t{delay:.1}\t{}\t{}\t{}\t{}\t{}", if glottal { "glottal" } else { "oral" }, tau * 1000.0, cell(0), cell(1), cell(2), cell(3), cell(4))
+        })).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     for l in lines {

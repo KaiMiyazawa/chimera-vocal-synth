@@ -105,6 +105,10 @@ pub struct TriangularGlottis {
     /// step: only abduction beyond it (a consonant's, /h/'s) parts the folds along their length,
     /// so a breathy voice stays a voice and does not turn into a whisper
     pub abduction_base: f64,
+    /// research switch (off by default): stiffening leaves the rest gap as it was. Off, a stiffer
+    /// fold (higher Q) also rests proportionally closer to the midline, as a higher pitch does, so
+    /// stiffening and adduction are confounded
+    pub stiffness_keeps_gap: bool,
     // pitch loop: cycle detection on the upper mass against its running mean
     x2_mean: f64,
     mean_coef: f64,
@@ -160,6 +164,7 @@ impl TriangularGlottis {
             trim_loop: true,
             stiffness: 0.0,
             abduction_base: 0.0,
+            stiffness_keeps_gap: false,
             x2_mean: 0.0,
             mean_coef: 1.0 - exp(-TAU * 15.0 / fs),
             armed: false,
@@ -274,7 +279,8 @@ impl TriangularGlottis {
         // folds from vibrating above an octave over F_NATURAL, and keep lax ones from closing)
         // smaller folds deflect less under the same pressure (force ∝ size², stiffness ∝ size), so
         // the gap scales with their size too
-        let gap_scale = size / js_max(1.0, q);
+        let q_gap = if self.stiffness_keeps_gap { q / (1.0 + self.stiffness) } else { q };
+        let gap_scale = size / js_max(1.0, q_gap);
         self.gap_scale = gap_scale;
         // pressing saturates (a tanh knee at MAX_PRESS): overlap beyond it would hold the folds shut
         // at speaking pressures, a silence no singer produces by pressing (they push harder)
