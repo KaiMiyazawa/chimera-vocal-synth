@@ -1,117 +1,151 @@
-//! Research probe (pillar 2): does the F0 of a vowel dip next to a voiced obstruent and rise after a
-//! voiceless one (microprosody) when nothing in the plan asks for it?
+//! Research probe (pillar 2): F0 just after an obstruent, with nothing in the plan asking for it.
 //!
-//! The plan holds F0 flat (no stress, `accent` 0, flat intonation), so any F0 movement around the
-//! consonant comes from the source. Two sources: the parametric pulse (F0 is set directly, so it
-//! should stay flat) and the two-mass folds (F0 comes out of the folds' mechanics under the
-//! transglottal pressure the airway computes, with a slow loop trimming tension toward the asked
-//! F0).
+//! Each item is a long lead /a/ (0.5 s, so the two-mass folds' trim loop settles at the asked F0),
+//! then a consonant and a vowel. The plan holds F0 flat (no stress, accent 0, flat intonation);
+//! roughness, drift and vibrato are 0. Sources: the pulse (F0 is set, so it should stay flat: the
+//! control), the folds with their trim loop, and the folds with the loop frozen 0.1 s before the
+//! consonant (at the operating point the loop reached), so nothing pulls F0 back.
 //!
-//! F0 is read cycle by cycle from the glottal area (its oscillating part, upward zero crossings). For each word `aCa`
-//! it reports, relative to the F0 at the middle of the second vowel (its last third): F0 at
-//! 5, 10, 20, 30 and 40 ms after the second vowel's voicing onset (the first frame from the
-//! consonant's release on that is periodic), and the lowest F0 in the last 40 ms of the first vowel
-//! (the dip into a voiced obstruent).
-//! Run: `cargo run --release -q -p chimera --example microprosody_probe`
+//! F0 is read cycle by cycle from successive peaks (cycle_check's reader, validated on the pulse
+//! after the consonant: within ±1 Hz from the first voiced cycle to 60 ms in): of the pulse's area,
+//! and of the folds' upper-mass displacement, which carries no abduction offset. Reported: the
+//! mean change of F0 (Hz) in windows after the voicing onset (the start of the first cycle after
+//! the consonant's release, the end of its segment; `delay_ms` is how long after the release),
+//! against the mean F0 of the 100 ms that end 60 ms before the consonant, as mean and range over
+//! ten start offsets (0-9 ms). Before the consonant the reader is not within ±1 Hz (cycle shape
+//! changes), so nothing is reported there.
+//! Run: `cargo run --release -q -p chimera --example microprosody_probe > out.tsv`
+use chimera::phonetics::Intonation;
 use chimera::phonetics::ipa::tokenize_ipa;
 use chimera::phonetics::planner::{PlanOptions, plan_utterance};
-use chimera::phonetics::Intonation;
 use chimera::voice::human_voice::{GlottisModel, HumanVoice, SourcePatch};
 
 const FS: f64 = 48000.0;
 const F0: f64 = 110.0;
+const WINDOWS: [(f64, f64); 5] = [(0.0, 0.01), (0.01, 0.02), (0.02, 0.03), (0.03, 0.04), (0.04, 0.06)];
 
-/// F0 cycle by cycle from the glottal area; each cycle's F0 is assigned to its midpoint.
-/// Stiffening for each voiceless obstruent: the timing of its own glottal opening, carried `carry`
-/// seconds further into the next vowel, at `amount` of the tension factor.
-fn stiffening(plan: &chimera::phonetics::Plan, amount: f64, carry: f64) -> Vec<(chimera::control::score::Gesture, f64)> {
-    plan.gestures
-        .iter()
-        .filter(|g| g.label.as_ref().is_some_and(|l| ["aspiration", "voiceless"].contains(&l.as_str())))
-        .map(|g| {
-            let mut s = g.clone();
-            s.ramp_out += carry;
-            (s, amount)
-        })
-        .collect()
-}
-
-fn track(ipa: &str, model: GlottisModel, trim_loop: bool, stiff: (f64, f64)) -> (Vec<(f64, f64)>, chimera::phonetics::Plan) {
-    let mut input = tokenize_ipa(ipa);
-    for s in input.iter_mut() {
-        s.stress = Some(0);
-    }
-    let plan = plan_utterance(&input, &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(F0), accent: Some(0.0), intonation: Some(Intonation::Flat), ..Default::default() });
-    let mut v = HumanVoice::with_defaults(FS);
-    v.set_source(&SourcePatch { glottis: Some(model), vibrato_depth: Some(0.0), drift: Some(0.0), ..Default::default() });
-    v.folds.trim_loop = trim_loop;
-    if stiff.0 > 0.0 {
-        v.stiffness_track = stiffening(&plan, stiff.0, stiff.1);
-    }
-    v.schedule(&plan.gestures);
-    let n = (FS * (plan.end + 0.1)).round() as usize;
-    let mut out = [0.0f32; 1];
-    let mut area = Vec::with_capacity(n);
-    for _ in 0..n {
-        v.render(&mut out);
-        area.push(if model == GlottisModel::TwoMass { v.folds.area } else { v.glottis.area });
-    }
-    // the oscillating part: the area less its 5 ms moving average; a cycle runs from one upward
-    // zero crossing to the next (2.5–15 ms apart) and counts if it swings by at least 0.01 cm²
-    let half = (0.0025 * FS) as usize;
-    let mut sum = 0.0;
-    let mut acc = vec![0.0; n + 1];
-    for i in 0..n {
-        sum += area[i];
-        acc[i + 1] = sum;
-    }
-    let ac: Vec<f64> = (0..n).map(|i| {
-        let (lo, hi) = (i.saturating_sub(half), (i + half + 1).min(n));
-        area[i] - (acc[hi] - acc[lo]) / (hi - lo) as f64
-    }).collect();
-    let ups: Vec<usize> = (1..n).filter(|&i| ac[i - 1] < 0.0 && ac[i] >= 0.0).collect();
-    let cycles = ups
-        .windows(2)
-        .filter_map(|w| {
-            let per = (w[1] - w[0]) as f64 / FS;
-            let seg = &ac[w[0]..w[1]];
-            let swing = seg.iter().cloned().fold(f64::MIN, f64::max) - seg.iter().cloned().fold(f64::MAX, f64::min);
-            (per >= 0.0025 && per <= 0.015 && swing >= 0.01).then(|| (0.5 * (w[0] + w[1]) as f64 / FS, 1.0 / per))
-        })
-        .collect();
-    (cycles, plan)
-}
-
-fn main() {
-    println!("model\tword\tC\tdip_v1\tfirst\t+5ms\t+10ms\t+20ms\t+30ms\t+40ms\tref_hz\tonset_ms");
-    let only_folds = std::env::args().any(|a| a == "--stiffness");
-    let mut models: Vec<(GlottisModel, String, bool, (f64, f64))> = vec![];
-    if !only_folds {
-        models.push((GlottisModel::Parametric, "pulse".into(), true, (0.0, 0.0)));
-        models.push((GlottisModel::TwoMass, "folds".into(), true, (0.0, 0.0)));
-    }
-    models.push((GlottisModel::TwoMass, "folds-noloop".into(), false, (0.0, 0.0)));
-    if only_folds {
-        for amount in [0.2, 0.4, 0.6] {
-            for carry in [0.02, 0.05] {
-                models.push((GlottisModel::TwoMass, format!("stiff{amount:.1}-c{:.0}", carry * 1000.0), false, (amount, carry)));
+/// (time of the cycle's midpoint, F0) from successive peaks of `y` (cycle_check's reader).
+fn cycles_from_peaks(y: &[f64], half: usize, min_prominence: f64) -> Vec<(f64, f64)> {
+    let n = y.len();
+    let mut peaks: Vec<f64> = vec![];
+    let mut last_peak_i: Option<usize> = None;
+    for i in half..n.saturating_sub(half) {
+        let w = &y[i - half..=i + half];
+        if w.iter().all(|&v| v <= y[i]) && w.iter().filter(|&&v| v == y[i]).count() == 1 {
+            let lo = last_peak_i.map_or(&y[i.saturating_sub(4 * half)..i], |j| &y[j..i]).iter().cloned().fold(f64::MAX, f64::min);
+            if y[i] - lo >= min_prominence {
+                let (a, b, c) = (y[i - 1], y[i], y[i + 1]);
+                let den = a - 2.0 * b + c;
+                let off = if den.abs() > 1e-18 { 0.5 * (a - c) / den } else { 0.0 };
+                peaks.push((i as f64 + off) / FS);
+                last_peak_i = Some(i);
             }
         }
     }
-    for (model, name, trim, stiff) in models {
-        for (w, c) in [("apa", "p"), ("aba", "b"), ("ata", "t"), ("ada", "d"), ("aka", "k"), ("aga", "g"), ("asa", "s"), ("aza", "z"), ("afa", "f"), ("ava", "v"), ("ama", "m"), ("aha", "h")] {
-            let (f, plan) = track(w, model, trim, stiff);
-            let (v1, cs, v2) = (&plan.segments[0], &plan.segments[1], &plan.segments[2]);
-            // the cycle whose midpoint is nearest, if within 6 ms
-            let at = |t: f64| f.iter().min_by(|a, b| (a.0 - t).abs().total_cmp(&(b.0 - t).abs())).filter(|x| (x.0 - t).abs() < 0.006).map(|x| x.1).unwrap_or(0.0);
-            let tail: Vec<f64> = f.iter().filter(|x| x.0 > v2.t1 - (v2.t1 - v2.t0) / 3.0 && x.0 < v2.t1 && x.1 > 0.0).map(|x| x.1).collect();
-            let reference = if tail.is_empty() { f64::NAN } else { tail.iter().sum::<f64>() / tail.len() as f64 };
-            // the first cycle after the consonant's release (its segment end, less 10 ms)
-            let onset = f.iter().find(|x| x.0 >= cs.t1 - 0.01).map(|x| x.0).unwrap_or(f64::NAN);
-            let dip = f.iter().filter(|x| x.0 > v1.t1 - 0.04 && x.0 <= v1.t1 + 0.01 && x.1 > 0.0).map(|x| x.1).fold(f64::NAN, f64::min);
-            let rel = |hz: f64| if hz > 0.0 { format!("{:+.1}", hz - reference) } else { "-".to_string() };
-            let first = f.iter().find(|x| x.0 >= onset).map(|x| x.1).unwrap_or(0.0);
-            println!("{name}\t{w}\t{c}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.0}", rel(dip), rel(first), rel(at(onset + 0.005)), rel(at(onset + 0.01)), rel(at(onset + 0.02)), rel(at(onset + 0.03)), rel(at(onset + 0.04)), reference, (onset - cs.t1) * 1000.0);
+    peaks.windows(2).filter(|w| w[1] - w[0] < 0.015).map(|w| (0.5 * (w[0] + w[1]), 1.0 / (w[1] - w[0]))).collect()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Src {
+    Pulse,
+    Folds,
+    Frozen,
+}
+
+/// Mean F0 change per window after the release, and the first voiced cycle's delay (ms).
+fn measure(ipa: &str, aspirated: Option<bool>, src: Src, offset: f64) -> (Vec<Option<f64>>, f64) {
+    let mut input = tokenize_ipa(ipa);
+    input[0].dur = Some(0.5);
+    for s in input.iter_mut() {
+        s.stress = Some(0);
+        if ["p", "t", "k"].contains(&s.ipa.as_str()) {
+            s.aspirated = aspirated;
         }
+    }
+    let plan = plan_utterance(&input, &PlanOptions { body: "male".into(), t0: 0.05 + offset, f0: Some(F0), accent: Some(0.0), intonation: Some(Intonation::Flat), ..Default::default() });
+    let c = plan.segments[1].clone();
+    let mut v = HumanVoice::with_defaults(FS);
+    let model = if src == Src::Pulse { GlottisModel::Parametric } else { GlottisModel::TwoMass };
+    v.set_source(&SourcePatch { glottis: Some(model), roughness: Some(0.0), vibrato_depth: Some(0.0), drift: Some(0.0), ..Default::default() });
+    v.schedule(&plan.gestures);
+    let n = (FS * (plan.end + 0.05)) as usize;
+    let freeze = ((c.t0 - 0.1) * FS) as usize;
+    let mut out = [0.0f32; 1];
+    let mut y = Vec::with_capacity(n);
+    for i in 0..n {
+        if src == Src::Frozen && i == freeze {
+            v.folds.trim_loop = false;
+        }
+        v.render(&mut out);
+        y.push(if src == Src::Pulse { v.glottis.area } else { v.folds.displacement() });
+    }
+    let (half, prom) = ((0.0025 * FS) as usize, if src == Src::Pulse { 0.003 } else { 0.002 });
+    let cyc = cycles_from_peaks(&y, half, prom);
+    let mean = |a: f64, b: f64| {
+        let s: Vec<f64> = cyc.iter().filter(|x| x.0 >= a && x.0 < b).map(|x| x.1).collect();
+        (!s.is_empty()).then(|| s.iter().sum::<f64>() / s.len() as f64)
+    };
+    let reference = mean(c.t0 - 0.16, c.t0 - 0.06).unwrap_or(f64::NAN);
+    // windows run from the voicing onset: the start of the first cycle after the release
+    let first = cyc.iter().find(|x| x.0 >= c.t1 - 0.005).copied();
+    let delay = first.map_or(f64::NAN, |x| (x.0 - 0.5 / x.1 - c.t1) * 1000.0);
+    let onset = first.map_or(f64::NAN, |x| x.0 - 0.5 / x.1);
+    (WINDOWS.iter().map(|&(a, b)| mean(onset + a, onset + b).map(|f| f - reference)).collect(), delay)
+}
+
+fn main() {
+    // (item, consonant shown, aspirated stops?)
+    let items: [(&str, &str, Option<bool>); 16] = [
+        ("apa", "p˭", Some(false)),
+        ("ata", "t˭", Some(false)),
+        ("aka", "k˭", Some(false)),
+        ("apa", "pʰ", Some(true)),
+        ("ata", "tʰ", Some(true)),
+        ("aka", "kʰ", Some(true)),
+        ("aba", "b", None),
+        ("ada", "d", None),
+        ("aga", "g", None),
+        ("asa", "s", None),
+        ("aɕi", "ɕ(i)", None),
+        ("açi", "ç(i)", None),
+        ("aɸɯ", "ɸ(ɯ)", None),
+        ("aha", "h", None),
+        ("aza", "z", None),
+        ("ama", "m", None),
+    ];
+    let rev = std::process::Command::new("git").args(["describe", "--always", "--dirty"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+    println!("# microprosody_probe at {}", rev.trim());
+    println!("# male, F0 {F0} Hz flat, roughness/drift/vibrato 0, lead /a/ 0.5 s, frozen loop 0.1 s before the consonant; 10 start offsets; mean [min,max] Hz vs the 100 ms ending 60 ms before the consonant");
+    println!("source\titem\tC\tdelay_ms\tonset+0-10ms\t10-20ms\t20-30ms\t30-40ms\t40-60ms");
+    let jobs: Vec<(Src, &str, &str, Option<bool>)> = [Src::Pulse, Src::Folds, Src::Frozen].iter().flat_map(|&s| items.iter().map(move |&(w, c, a)| (s, w, c, a))).collect();
+    let lines: Vec<String> = std::thread::scope(|sc| {
+        let hs: Vec<_> = jobs
+            .iter()
+            .map(|&(src, w, c, asp)| {
+                sc.spawn(move || {
+                    let runs: Vec<(Vec<Option<f64>>, f64)> = (0..10).map(|o| measure(w, asp, src, o as f64 * 0.001)).collect();
+                    let cell = |k: usize| {
+                        let xs: Vec<f64> = runs.iter().filter_map(|r| r.0[k]).collect();
+                        if xs.is_empty() {
+                            return "-".to_string();
+                        }
+                        let m = xs.iter().sum::<f64>() / xs.len() as f64;
+                        let (lo, hi) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
+                        format!("{m:+.1} [{lo:+.1},{hi:+.1}]{}", if xs.len() < runs.len() { format!(" n={}", xs.len()) } else { String::new() })
+                    };
+                    let delay = runs.iter().map(|r| r.1).filter(|d| d.is_finite()).sum::<f64>() / runs.len() as f64;
+                    let name = match src {
+                        Src::Pulse => "pulse",
+                        Src::Folds => "folds",
+                        Src::Frozen => "folds-frozen",
+                    };
+                    format!("{name}\t{w}\t{c}\t{delay:.1}\t{}\t{}\t{}\t{}\t{}", cell(0), cell(1), cell(2), cell(3), cell(4))
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for l in lines {
+        println!("{l}");
     }
 }
