@@ -43,7 +43,8 @@
 //! `PROBE_FOLDS_LOOP` (`on`, default, or `frozen`: the folds' trim is settled once on a held /e/
 //! at the probe's F0 and kept, the loop off); `PROBE_ABDUCT_REST` (the folds' `abduct_rest`,
 //! default the engine's 0.5; 0 makes the rest area equal the abduction asked for);
-//! `PROBE_LUNG_R` (factor on the lungs' series resistance, default 1).
+//! `PROBE_LUNG_R` (factor on the lungs' series resistance, default 1); `PROBE_TRACE` (`word,ms`:
+//! for that word and nominal length, unaspirated, frame by frame around the release, to stderr).
 //!
 //! Output: tab-separated, with `#` lines first (commit, settings).
 //! Run: `cargo run --release -q -p chimera --example devoicing_probe > probe.tsv`
@@ -169,6 +170,8 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
         pg: f64,
         abd: f64,
         tb_y: f64,
+        amin: f64,
+        chmin: f64,
     }
     let mut blocks: Vec<B> = vec![];
     // the folds' channel and swing, sample by sample (folds only)
@@ -185,10 +188,12 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
         }
         let t = (i + BLOCK / 2) as f64 / FS;
         let f = v.airway.frame.as_ref().expect("the airway publishes a frame every block");
-        let shut = f.grid.iter().map(|g| g.area).fold(f64::MAX, f64::min) < 0.01;
+        let amin = f.grid.iter().map(|g| g.area).fold(f64::MAX, f64::min);
+        let shut = amin < 0.01;
+        let chmin = if c.folds { ch[i..].iter().cloned().fold(f64::MAX, f64::min) } else { f64::NAN };
         let released = g0.as_ref().is_none_or(|g| activation(g, t) < 0.5);
         let not_closing = g1.as_ref().is_none_or(|g| activation(g, t) < 0.5);
-        blocks.push(B { t, open: released && not_closing && !shut, gate: v.voicing(), p_gate: v.glottis.pressure_gate, ps: v.airway.net.p[sub] / CM_H2O, pg: v.airway.net.p[supra] / CM_H2O, abd: if c.folds { v.glottis.params.abduction } else { v.glottis.static_abduction() }, tb_y: v.artic.x.get(ArticKey::TbY) });
+        blocks.push(B { t, open: released && not_closing && !shut, gate: v.voicing(), p_gate: v.glottis.pressure_gate, ps: v.airway.net.p[sub] / CM_H2O, pg: v.airway.net.p[supra] / CM_H2O, abd: if c.folds { v.glottis.params.abduction } else { v.glottis.static_abduction() }, tb_y: v.artic.x.get(ArticKey::TbY), amin, chmin });
     }
     // the open run around the vowel: the longest run of open blocks that overlaps [t0, t1]
     let mut best: Option<(usize, usize)> = None;
@@ -241,6 +246,21 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
         let k = inside.len() as f64;
         (close as f64 / k, swing as f64 / k, (inside.len() - close - swing) as f64 / k)
     });
+    // PROBE_TRACE=word,nominal_ms: frame by frame around the release (unaspirated, no advance,
+    // overlap, tongue target), to stderr
+    if let Some((tw, td)) = &st.trace
+        && tw == word && (c.dur * 1000.0 - td).abs() < 0.5 && c.vot.is_none() && c.adv == 0.0 && c.peak.is_none() && !c.tongue_none
+    {
+        let gl = if c.folds { "folds" } else if c.threshold { "threshold" } else { "cutoff" };
+        eprintln!("# trace {word} {td} ms {gl}: open {:.1} ms, from {:.1} ms after the planned vowel's start to {:.1} ms after its end; loudest frame rms {:.4}", (o1 - o0) * 1000.0, (o0 - t0) * 1000.0, (o1 - t1) * 1000.0, loudest);
+        eprintln!("kind\tglottis\tword\tt_ms\tap\tdb\tvoiced\tamin\tps\tpg\tdp\tabd\tchmin");
+        for f in frames.iter().filter(|f| f.0 >= o0 - 0.03 && f.0 <= o0 + 0.09) {
+            eprintln!("frame\t{gl}\t{word}\t{:.1}\t{:.3}\t{:.1}\t{}", (f.0 - o0) * 1000.0, f.2, db(f.1), is_voiced(f) as u8);
+        }
+        for b in blocks.iter().filter(|b| b.t >= o0 - 0.03 && b.t <= o0 + 0.09) {
+            eprintln!("block\t{gl}\t{word}\t{:.1}\t\t\t\t{:.4}\t{:.2}\t{:.2}\t{:.2}\t{:.4}\t{:.5}", (b.t - o0) * 1000.0, b.amin, b.ps, b.pg, b.ps - b.pg, b.abd, b.chmin);
+        }
+    }
     Some(Row { lead_ms, tail_ms, states, open_ms: (o1 - o0) * 1000.0, voiced, gate: mean(&|b| b.gate), p_gate: mean(&|b| b.p_gate), ps: mean(&|b| b.ps), pg: mean(&|b| b.pg), abd: mean(&|b| b.abd), tb_y: mean(&|b| b.tb_y) })
 }
 
@@ -251,6 +271,7 @@ struct Settings {
     frozen_trim: Option<f64>,
     abduct_rest: Option<f64>,
     lung_r: f64,
+    trace: Option<(String, f64)>,
 }
 
 static SETTINGS: std::sync::OnceLock<Settings> = std::sync::OnceLock::new();
@@ -270,6 +291,10 @@ fn settings() -> &'static Settings {
             frozen_trim: frozen.then(settled_trim),
             abduct_rest: num("PROBE_ABDUCT_REST"),
             lung_r: num("PROBE_LUNG_R").unwrap_or(1.0),
+            trace: env("PROBE_TRACE").map(|v| {
+                let (w, d) = v.split_once(',').expect("PROBE_TRACE: word,nominal_ms");
+                (w.trim().to_string(), d.trim().parse().expect("PROBE_TRACE: nominal ms, a number"))
+            }),
         }
     })
 }
@@ -317,8 +342,10 @@ fn main() {
     let st = settings();
     let words: Vec<(&str, &str)> = words.into_iter().filter(|(w, _)| !quick || ["kita", "gida"].contains(w)).filter(|(w, _)| st.words.as_ref().is_none_or(|ws| ws.iter().any(|x| x == w))).collect();
     let peaked = ["kita", "kɯta", "kɯɕa"];
-    let durs: Vec<f64> = if quick { vec![0.06, 0.1, 0.16] } else { (4..=20).map(|d| d as f64 * 0.01).collect() };
-    let vots = [None, Some(0.03), Some(0.05)];
+    // with PROBE_TRACE only the traced condition is run
+    let traced = st.trace.as_ref().map(|t| t.1 / 1000.0);
+    let durs: Vec<f64> = if let Some(d) = traced { vec![d] } else if quick { vec![0.06, 0.1, 0.16] } else { (4..=20).map(|d| d as f64 * 0.01).collect() };
+    let vots: Vec<Option<f64>> = if traced.is_some() { vec![None] } else { vec![None, Some(0.03), Some(0.05)] };
     let glottises: Vec<String> = std::env::var("PROBE_GLOTTIS").unwrap_or_else(|_| "cutoff,threshold".into()).split(',').map(|g| g.trim().to_string()).collect();
     assert!(glottises.iter().all(|g| ["cutoff", "threshold", "folds"].contains(&g.as_str())), "PROBE_GLOTTIS: cutoff, threshold, folds");
     let rev = std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
@@ -341,7 +368,7 @@ fn main() {
             .flat_map(|&(w, grp)| glottises.iter().map(move |g| (w, grp, g.as_str())))
             .map(|(w, grp, glottis)| {
                 let (threshold, folds) = (glottis == "threshold", glottis == "folds");
-                let durs = &durs;
+                let (durs, vots) = (&durs, &vots);
                 sc.spawn(move || {
                     let mut lines = vec![];
                     let mut emit = |block: &str, c: Cond| {
@@ -360,15 +387,16 @@ fn main() {
                             c.dur * 1000.0, r.open_ms, r.ps, r.pg, r.ps - r.pg, r.abd, r.tb_y, opt(r.lead_ms, 1), opt(r.tail_ms, 1)
                         ));
                     };
-                    for vot in vots {
-                        for adv in [0.0, 0.02, 0.04, 0.06] {
-                            for tongue_none in [false, true] {
+                    let traced = traced.is_some();
+                    for &vot in vots {
+                        for adv in if traced { vec![0.0] } else { vec![0.0, 0.02, 0.04, 0.06] } {
+                            for tongue_none in if traced { vec![false] } else { vec![false, true] } {
                                 for &dur in durs {
                                     emit("main", Cond { threshold, folds, vot, adv, peak: None, tongue_none, dur });
                                 }
                             }
                         }
-                        if peaked.contains(&w) {
+                        if peaked.contains(&w) && !traced {
                             for size in [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4] {
                                 for &dur in durs {
                                     emit("peak", Cond { threshold, folds, vot, adv: 0.0, peak: Some(size), tongue_none: false, dur });
