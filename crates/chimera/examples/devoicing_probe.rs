@@ -44,7 +44,9 @@
 //! at the probe's F0 and kept, the loop off); `PROBE_ABDUCT_REST` (the folds' `abduct_rest`,
 //! default the engine's 0.5; 0 makes the rest area equal the abduction asked for);
 //! `PROBE_LUNG_R` (factor on the lungs' series resistance, default 1); `PROBE_TRACE` (`word,ms`:
-//! for that word and nominal length, unaspirated, frame by frame around the release, to stderr).
+//! for that word and nominal length, unaspirated, frame by frame around the release, to stderr);
+//! `PROBE_LOCK_RELEASE=1` (the first consonant's glottal openings move with where its release
+//! falls, found in a first pass: the openings are timed to the release, not the plan).
 //!
 //! Output: tab-separated, with `#` lines first (commit, settings).
 //! Run: `cargo run --release -q -p chimera --example devoicing_probe > probe.tsv`
@@ -72,10 +74,14 @@ struct Cond {
     peak: Option<f64>,
     tongue_none: bool,
     dur: f64,
+    /// the first consonant's openings move by this much (s); set by `PROBE_LOCK_RELEASE`
+    shift: f64,
 }
 
 #[derive(Default)]
 struct Row {
+    /// the open interval's start minus the planned vowel's start (s)
+    start: f64,
     lead_ms: Option<f64>,
     tail_ms: Option<f64>,
     states: Option<(f64, f64, f64)>,
@@ -99,7 +105,20 @@ fn dominant<'a>(gs: &'a [Gesture], ipa: &str, t0: f64, t1: f64) -> Option<&'a Ge
     gs.iter().filter(|g| is_label(g, &[ipa]) && g.t0 < t1 && g.t1 > t0).max_by(|a, b| a.strength.total_cmp(&b.strength))
 }
 
+/// With `PROBE_LOCK_RELEASE` the first consonant's openings are moved by where its release fell
+/// in a first pass (the open interval's start against the planned vowel's start), so that they
+/// keep the same timing against the release whatever the vowel; otherwise one pass.
 fn probe(word: &str, c: Cond) -> Option<Row> {
+    let first = probe_once(word, c)?;
+    if !settings().lock_release || first.open_ms == 0.0 {
+        return Some(first);
+    }
+    let mut r = probe_once(word, Cond { shift: first.start, ..c })?;
+    r.start = first.start;
+    Some(r)
+}
+
+fn probe_once(word: &str, c: Cond) -> Option<Row> {
     let mut input = tokenize_ipa(&format!("e{word}to"));
     let k = (0..input.len()).filter(|&i| is_vowel(&input[i].ipa, "male".into())).nth(1)?;
     input[k].dur = Some(c.dur);
@@ -113,6 +132,12 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
     let (t0, t1) = (plan.segments[k].t0, plan.segments[k].t1);
     let (c0, c1) = (plan.segments[k - 1].clone(), plan.segments[k + 1].clone());
     let flank = |g: &Gesture, s: &chimera::phonetics::PlannedSegment| is_label(g, &OPENINGS) && g.t0 < s.t1 && g.t1 > s.t0;
+    if c.shift != 0.0 {
+        for g in plan.gestures.iter_mut().filter(|g| flank(g, &c0)) {
+            g.t0 += c.shift;
+            g.t1 += c.shift;
+        }
+    }
     // the following consonant's opening starts earlier
     if c.adv > 0.0 {
         for g in plan.gestures.iter_mut().filter(|g| flank(g, &c1)) {
@@ -261,7 +286,7 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
             eprintln!("block\t{gl}\t{word}\t{:.1}\t\t\t\t{:.4}\t{:.2}\t{:.2}\t{:.2}\t{:.4}\t{:.5}", (b.t - o0) * 1000.0, b.amin, b.ps, b.pg, b.ps - b.pg, b.abd, b.chmin);
         }
     }
-    Some(Row { lead_ms, tail_ms, states, open_ms: (o1 - o0) * 1000.0, voiced, gate: mean(&|b| b.gate), p_gate: mean(&|b| b.p_gate), ps: mean(&|b| b.ps), pg: mean(&|b| b.pg), abd: mean(&|b| b.abd), tb_y: mean(&|b| b.tb_y) })
+    Some(Row { start: o0 - t0, lead_ms, tail_ms, states, open_ms: (o1 - o0) * 1000.0, voiced, gate: mean(&|b| b.gate), p_gate: mean(&|b| b.p_gate), ps: mean(&|b| b.ps), pg: mean(&|b| b.pg), abd: mean(&|b| b.abd), tb_y: mean(&|b| b.tb_y) })
 }
 
 /// Settings read from the environment (see the module comment).
@@ -272,6 +297,7 @@ struct Settings {
     abduct_rest: Option<f64>,
     lung_r: f64,
     trace: Option<(String, f64)>,
+    lock_release: bool,
 }
 
 static SETTINGS: std::sync::OnceLock<Settings> = std::sync::OnceLock::new();
@@ -291,6 +317,7 @@ fn settings() -> &'static Settings {
             frozen_trim: frozen.then(settled_trim),
             abduct_rest: num("PROBE_ABDUCT_REST"),
             lung_r: num("PROBE_LUNG_R").unwrap_or(1.0),
+            lock_release: env("PROBE_LOCK_RELEASE").is_some_and(|v| v == "1"),
             trace: env("PROBE_TRACE").map(|v| {
                 let (w, d) = v.split_once(',').expect("PROBE_TRACE: word,nominal_ms");
                 (w.trim().to_string(), d.trim().parse().expect("PROBE_TRACE: nominal ms, a number"))
@@ -353,13 +380,14 @@ fn main() {
     println!("# devoicing_probe at {}{}", rev.trim(), if dirty { " (uncommitted changes)" } else { "" });
     println!("# male, f0 {F0} Hz, Breath 8 cmH2O, frame e_X_to, no stress, fs {FS}; glottis cutoff = engine default, threshold = research option (8 cmH2O/cm2 above 0.045 cm2), folds = two-mass; peak strength 2");
     println!(
-        "# run: glottis {}; words {}; YIN min {} Hz; folds loop {}; abduct_rest {}; lung resistance x{}",
+        "# run: glottis {}; words {}; YIN min {} Hz; folds loop {}; abduct_rest {}; lung resistance x{}; openings locked to the release {}",
         glottises.join(","),
         st.words.as_ref().map_or("all".to_string(), |w| w.join(",")),
         st.yin_min,
         st.frozen_trim.map_or("on".to_string(), |t| format!("frozen (trim {t:.4})")),
         st.abduct_rest.map_or("engine".to_string(), |a| a.to_string()),
-        st.lung_r
+        st.lung_r,
+        st.lock_release
     );
     println!("block\tword\tgroup\tglottis\tvot\tadv_ms\tlarynx\ttongue\tnominal_ms\topen_ms\tvoiced\tgate\tp_gate\tps\tpg\tdp\tabd\ttb_y\tlead_ms\ttail_ms\tf_close\tf_swing\tf_still");
     let rows: Vec<Vec<String>> = std::thread::scope(|sc| {
@@ -392,14 +420,14 @@ fn main() {
                         for adv in if traced { vec![0.0] } else { vec![0.0, 0.02, 0.04, 0.06] } {
                             for tongue_none in if traced { vec![false] } else { vec![false, true] } {
                                 for &dur in durs {
-                                    emit("main", Cond { threshold, folds, vot, adv, peak: None, tongue_none, dur });
+                                    emit("main", Cond { threshold, folds, vot, adv, peak: None, tongue_none, dur, shift: 0.0 });
                                 }
                             }
                         }
                         if peaked.contains(&w) && !traced {
                             for size in [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4] {
                                 for &dur in durs {
-                                    emit("peak", Cond { threshold, folds, vot, adv: 0.0, peak: Some(size), tongue_none: false, dur });
+                                    emit("peak", Cond { threshold, folds, vot, adv: 0.0, peak: Some(size), tongue_none: false, dur, shift: 0.0 });
                                 }
                             }
                         }
