@@ -109,6 +109,18 @@ pub struct TriangularGlottis {
     /// fold (higher Q) also rests proportionally closer to the midline, as a higher pitch does, so
     /// stiffening and adduction are confounded
     pub stiffness_keeps_gap: bool,
+    /// research input (`CONTACT_STIFFNESS` by default): how much stiffer than its own spring a mass
+    /// is while the folds are in contact. The contact force stiffens the folds over the closed part
+    /// of each cycle, so F0 depends on how long and how deeply they touch.
+    pub contact_stiffness: f64,
+    /// research input (1 by default): the fraction of the extra damping in contact (`Z1_CLOSED`,
+    /// `Z2_CLOSED` over the open values) that is applied
+    pub contact_damping: f64,
+    /// research switches (on by default): while a mass is shut, the subglottal pressure pushes on
+    /// it (the lower one when it is shut; both when only the upper is: Steinecke & Herzel 1995).
+    /// Off, that push is left out: not a physical setting, a way to see what the push does to F0.
+    pub closed_push_lower: bool,
+    pub closed_push_upper: bool,
     // pitch loop: cycle detection on the upper mass against its running mean
     x2_mean: f64,
     mean_coef: f64,
@@ -165,6 +177,10 @@ impl TriangularGlottis {
             stiffness: 0.0,
             abduction_base: 0.0,
             stiffness_keeps_gap: false,
+            contact_stiffness: CONTACT_STIFFNESS,
+            contact_damping: 1.0,
+            closed_push_lower: true,
+            closed_push_upper: true,
             x2_mean: 0.0,
             mean_coef: 1.0 - exp(-TAU * 15.0 / fs),
             armed: false,
@@ -222,6 +238,11 @@ impl TriangularGlottis {
     /// Phase within the current cycle, 0..1 (restarts at each opening).
     /// the upper mass's displacement from its rest (cm, telemetry): it swings with the folds and,
     /// unlike the glottal area, carries no abduction offset, so cycles can be read from it
+    /// Research telemetry: the smoothed tension factor Q the masses run at (masses / Q, springs · Q).
+    pub fn tension(&self) -> f64 {
+        self.q_sm
+    }
+
     pub fn displacement(&self) -> f64 {
         self.x2
     }
@@ -296,9 +317,9 @@ impl TriangularGlottis {
         // ---- aerodynamic pressures on the masses (Steinecke & Herzel 1995)
         let eps = 1e-6;
         let (p1, p2) = if a1 <= eps {
-            (dp, 0.0)
+            (if self.closed_push_lower { dp } else { 0.0 }, 0.0)
         } else if a2 <= eps {
-            (dp, dp)
+            (dp, if self.closed_push_upper { dp } else { 0.0 })
         } else {
             let amin = js_min(a1, a2);
             let r = amin / a1;
@@ -313,13 +334,13 @@ impl TriangularGlottis {
         let k1 = K1 * size * q;
         let k2 = K2 * size * q;
         let kc = KC * size * q;
-        let z1 = Z1_OPEN + (Z1_CLOSED - Z1_OPEN) * c1;
-        let z2 = Z2_OPEN + (Z2_CLOSED - Z2_OPEN) * c2;
+        let z1 = Z1_OPEN + (Z1_CLOSED - Z1_OPEN) * c1 * self.contact_damping;
+        let z2 = Z2_OPEN + (Z2_CLOSED - Z2_OPEN) * c2 * self.contact_damping;
         let b1 = 2.0 * z1 * sqrt(m1 * k1);
         let b2 = 2.0 * z2 * sqrt(m2 * k2);
         // tissue compression: the penetration (mean over the length) pushes back
-        let fc1 = CONTACT_STIFFNESS * k1 * pen1;
-        let fc2 = CONTACT_STIFFNESS * k2 * pen2;
+        let fc1 = self.contact_stiffness * k1 * pen1;
+        let fc2 = self.contact_stiffness * k2 * pen2;
         let acc1 = (f1 + fc1 - b1 * self.v1 - k1 * self.x1 - kc * (self.x1 - self.x2)) / m1;
         let acc2 = (f2 + fc2 - b2 * self.v2 - k2 * self.x2 - kc * (self.x2 - self.x1)) / m2;
         // semi-implicit Euler: velocities first, then positions with the new velocities
