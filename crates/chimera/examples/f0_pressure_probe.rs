@@ -12,7 +12,9 @@
 //! still to be read (Titze 1989).
 //! With `--no-lower-push` the folds run without the subglottal push on the shut lower mass (a
 //! diagnosis only, see onset_probe).
-//! Run: `cargo run --release -q -p chimera --example f0_pressure_probe [-- --no-lower-push]`
+//! With `--cubic EK,EH` the folds' springs and contact get cubic terms (η, cm⁻²; Ishizaka &
+//! Flanagan 1972 use 100 and 500).
+//! Run: `cargo run --release -q -p chimera --example f0_pressure_probe [-- --no-lower-push] [--cubic EK,EH]`
 use chimera::phonetics::Intonation;
 use chimera::phonetics::ipa::tokenize_ipa;
 use chimera::phonetics::planner::{PlanOptions, plan_utterance};
@@ -24,7 +26,7 @@ mod peaks;
 
 const FS: f64 = 48000.0;
 
-fn run(model: GlottisModel, f0: f64, p_after: f64, lower_push: bool) -> (f64, f64, f64, f64) {
+fn run(model: GlottisModel, f0: f64, p_after: f64, lower_push: bool, cubic: (f64, f64)) -> (f64, f64, f64, f64) {
     let mut input = tokenize_ipa("ɑ");
     input[0].dur = Some(1.6);
     input[0].stress = Some(0);
@@ -32,6 +34,7 @@ fn run(model: GlottisModel, f0: f64, p_after: f64, lower_push: bool) -> (f64, f6
     let mut v = HumanVoice::with_defaults(FS);
     v.set_source(&SourcePatch { glottis: Some(model), pressure: Some(8.0), roughness: Some(0.0), vibrato_depth: Some(0.0), drift: Some(0.0), ..Default::default() });
     v.folds.closed_push_lower = lower_push;
+    (v.folds.spring_cubic, v.folds.contact_cubic) = cubic;
     v.schedule(&plan.gestures);
     let n = (FS * 1.35) as usize;
     let (freeze, step) = ((FS * 0.6) as usize, (FS * 0.8) as usize);
@@ -64,8 +67,18 @@ fn run(model: GlottisModel, f0: f64, p_after: f64, lower_push: bool) -> (f64, f6
 }
 
 fn main() {
-    let lower_push = !std::env::args().any(|a| a == "--no-lower-push");
-    println!("# loop frozen at 0.6 s; lung pressure 8 -> P cmH2O at 0.8 s; before 0.65-0.8 s, after 1.0-1.3 s; lower push {}", if lower_push { "on" } else { "off" });
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let lower_push = !args.iter().any(|a| a == "--no-lower-push");
+    let cubic: (f64, f64) = args
+        .iter()
+        .position(|a| a == "--cubic")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        })
+        .unwrap_or((0.0, 0.0));
+    println!("# loop frozen at 0.6 s; lung pressure 8 -> P cmH2O at 0.8 s; before 0.65-0.8 s, after 1.0-1.3 s; lower push {}; cubic springs/contact {:?}", if lower_push { "on" } else { "off" }, cubic);
     println!("model\tf0_asked\tp_lung_after\tf0_before\tf0_after\tdF0\tptg_before\tptg_after\tdPtg\tHz_per_cmH2O_transglottal");
     let mut jobs = vec![];
     for (model, name) in [(GlottisModel::Parametric, "pulse"), (GlottisModel::TwoMass, "folds")] {
@@ -80,7 +93,7 @@ fn main() {
             .iter()
             .map(|&(m, name, f0, pa)| {
                 sc.spawn(move || {
-                    let (fb, fa, pb, pa2) = run(m, f0, pa, lower_push);
+                    let (fb, fa, pb, pa2) = run(m, f0, pa, lower_push, cubic);
                     format!("{name}\t{f0}\t{pa}\t{fb:.1}\t{fa:.1}\t{:+.2}\t{pb:.2}\t{pa2:.2}\t{:+.2}\t{:+.3}", fa - fb, pa2 - pb, (fa - fb) / (pa2 - pb))
                 })
             })

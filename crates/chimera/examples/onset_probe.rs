@@ -27,7 +27,9 @@
 //! the tension is the same for all sets, and `pre_hz` (0.7–0.8 s) against `settled_hz` is the set's
 //! own effect on F0 at that tension. With `--push-off A,B` the push on the shut lower mass is left
 //! out only from A to B s (the first cycles after the interruption, everything before identical).
-//! Run: `cargo run --release -q -p chimera --example onset_probe -- [--q-fixed] [--push-off A,B] [kc:zc:push ...]`
+//! With `--cubic EK,EH` the springs and the contact get cubic terms (Ishizaka & Flanagan 1972 use
+//! 100 and 500 cm⁻²) in every run, from the start.
+//! Run: `cargo run --release -q -p chimera --example onset_probe -- [--q-fixed] [--push-off A,B] [--cubic EK,EH] [kc:zc:push ...]`
 use chimera::control::score::{ControlKey, Gesture, Targets};
 use chimera::phonetics::Intonation;
 use chimera::phonetics::ipa::tokenize_ipa;
@@ -68,6 +70,8 @@ struct Set {
 struct Opts {
     q_fixed: bool,
     push_off: Option<(f64, f64)>,
+    /// cubic terms of the springs and of the contact (η, cm⁻²), from the start in every run
+    cubic: (f64, f64),
 }
 
 /// which shut masses are pushed by the subglottal pressure
@@ -96,6 +100,7 @@ fn run(cut: Cut, set: Set, o: Opts) -> String {
     let plan = plan_utterance(&input, &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(110.0), accent: Some(0.0), intonation: Some(Intonation::Flat), ..Default::default() });
     let mut v = HumanVoice::with_defaults(FS);
     v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), roughness: Some(0.0), vibrato_depth: Some(0.0), drift: Some(0.0), ..Default::default() });
+    (v.folds.spring_cubic, v.folds.contact_cubic) = o.cubic;
     if !o.q_fixed {
         apply(&mut v, set);
     }
@@ -217,12 +222,16 @@ fn main() {
         let (a, b) = s.split_once(',')?;
         Some((a.parse().ok()?, b.parse().ok()?))
     });
-    let o = Opts { q_fixed, push_off };
+    let cubic = args.iter().position(|a| a == "--cubic").and_then(|i| args.get(i + 1)).and_then(|s| {
+        let (a, b) = s.split_once(',')?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    });
+    let o = Opts { q_fixed, push_off, cubic: cubic.unwrap_or((0.0, 0.0)) };
     let sets: Vec<Set> = args
         .iter()
         .filter_map(|a| {
             let f: Vec<&str> = a.split(':').collect();
-            if f.len() < 2 {
+            if f.len() < 2 || a.contains(',') {
                 return None;
             }
             let push = match f.get(2).copied().unwrap_or("both") {

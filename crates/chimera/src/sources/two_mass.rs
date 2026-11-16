@@ -124,6 +124,13 @@ pub struct TriangularGlottis {
     /// pushes on it as well as on the lower one. Off, only the lower one is pushed then (a
     /// diagnosis, as `closed_push_lower`).
     pub closed_push_upper: bool,
+    /// research input (0 by default: linear springs): the cubic term of each mass's spring, η in
+    /// k·x·(1 + η·x²) (cm⁻²). Ishizaka & Flanagan 1972 use 100 (as reproduced in Assaneo &
+    /// Trevisan 2013, Eq. 2): the folds stiffen with the size of their swing.
+    pub spring_cubic: f64,
+    /// research input (0 by default): the cubic term of the contact force, η in
+    /// c·k·d·(1 + η·d²) with d the penetration (cm⁻²; Ishizaka & Flanagan 1972 use 500)
+    pub contact_cubic: f64,
     // pitch loop: cycle detection on the upper mass against its running mean
     x2_mean: f64,
     mean_coef: f64,
@@ -190,6 +197,8 @@ impl TriangularGlottis {
             contact_damping: 1.0,
             closed_push_lower: true,
             closed_push_upper: true,
+            spring_cubic: 0.0,
+            contact_cubic: 0.0,
             x2_mean: 0.0,
             mean_coef: 1.0 - exp(-TAU * 15.0 / fs),
             armed: false,
@@ -372,10 +381,12 @@ impl TriangularGlottis {
         let b1 = 2.0 * z1 * sqrt(m1 * k1);
         let b2 = 2.0 * z2 * sqrt(m2 * k2);
         // tissue compression: the penetration (mean over the length) pushes back
-        let fc1 = self.contact_stiffness * k1 * pen1;
-        let fc2 = self.contact_stiffness * k2 * pen2;
-        let acc1 = (f1 + fc1 - b1 * self.v1 - k1 * self.x1 - kc * (self.x1 - self.x2)) / m1;
-        let acc2 = (f2 + fc2 - b2 * self.v2 - k2 * self.x2 - kc * (self.x2 - self.x1)) / m2;
+        let fc1 = self.contact_stiffness * k1 * pen1 * (1.0 + self.contact_cubic * pen1 * pen1);
+        let fc2 = self.contact_stiffness * k2 * pen2 * (1.0 + self.contact_cubic * pen2 * pen2);
+        let s1 = k1 * self.x1 * (1.0 + self.spring_cubic * self.x1 * self.x1);
+        let s2 = k2 * self.x2 * (1.0 + self.spring_cubic * self.x2 * self.x2);
+        let acc1 = (f1 + fc1 - b1 * self.v1 - s1 - kc * (self.x1 - self.x2)) / m1;
+        let acc2 = (f2 + fc2 - b2 * self.v2 - s2 - kc * (self.x2 - self.x1)) / m2;
         // semi-implicit Euler: velocities first, then positions with the new velocities
         self.v1 += acc1 * self.dt;
         self.v2 += acc2 * self.dt;

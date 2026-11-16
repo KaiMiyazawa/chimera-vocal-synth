@@ -477,6 +477,8 @@ mod research_inputs {
             v.folds.contact_damping = 1.0;
             v.folds.closed_push_lower = true;
             v.folds.closed_push_upper = true;
+            v.folds.spring_cubic = 0.0;
+            v.folds.contact_cubic = 0.0;
         });
         assert_eq!(plain, explicit);
     }
