@@ -90,6 +90,14 @@ pub struct TriangularGlottis {
     sm_coef: f64,
     /// log2 trim of Q by the pitch loop
     q_trim: f64,
+    /// research switch (on by default): the slow loop that trims the folds' tension toward the
+    /// asked F0 after each clear cycle. Off, the tension follows the asked F0 alone, so F0 moves
+    /// with the folds' mechanics (pressure, adduction) and nothing pulls it back.
+    pub trim_loop: bool,
+    /// research input (0 by default): extra stiffening of the folds, as a fraction of their tension
+    /// factor Q (cricothyroid activity, as during voiceless obstruents: Halle & Stevens's [stiff
+    /// vocal folds]). F0 and whether the folds can vibrate then follow from the mechanics.
+    pub stiffness: f64,
     // pitch loop: cycle detection on the upper mass against its running mean
     x2_mean: f64,
     mean_coef: f64,
@@ -142,6 +150,8 @@ impl TriangularGlottis {
             q_sm: 1.0,
             sm_coef: 1.0 - exp(-1.0 / (0.004 * fs)),
             q_trim: 0.0,
+            trim_loop: true,
+            stiffness: 0.0,
             x2_mean: 0.0,
             mean_coef: 1.0 - exp(-TAU * 15.0 / fs),
             armed: false,
@@ -241,7 +251,7 @@ impl TriangularGlottis {
         // abduction (cm²) opens the posterior end: a triangle of that area, apex at the commissure
         self.post_sm += sc * (p.abduction / len - self.post_sm);
         self.chink_sm += sc * (p.chink - self.chink_sm);
-        let q_target = (f0 / F_NATURAL) * pow(2.0, self.q_trim) * self.cycle_q;
+        let q_target = (f0 / F_NATURAL) * pow(2.0, self.q_trim) * self.cycle_q * (1.0 + self.stiffness);
         self.q_sm += sc * (clamp(q_target, 0.15, 12.0) - self.q_sm);
         let q = self.q_sm;
         let post = self.post_sm * (1.0 - 0.92 * self.closure_sm);
@@ -372,7 +382,7 @@ impl TriangularGlottis {
         self.since = 0.0;
         let f = self.fs / js_max(1.0, period);
         // only a real oscillation (a clear swing, a plausible rate) steers the pitch
-        if self.swing > 0.004 && f > 25.0 && f < 2500.0 {
+        if self.trim_loop && self.swing > 0.004 && f > 25.0 && f < 2500.0 {
             self.period = period;
             let err = log2(f0 / f);
             self.q_trim = clamp(self.q_trim + 0.35 * err, -2.0, 2.0);

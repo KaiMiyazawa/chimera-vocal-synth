@@ -7,7 +7,7 @@ use crate::airway::decimator::Decimator;
 use crate::anatomy::geom::Vec2;
 use crate::anatomy::human::{ArticKey, ArticPatch, BODY_MALE, HumanBody, N_ARTIC};
 use crate::control::articulators::ArticulatorBank;
-use crate::control::score::{Blended, ControlKey, Gesture, GestureScore, Label, N_CONTROL};
+use crate::control::score::{Blended, ControlKey, Gesture, GestureScore, Label, N_CONTROL, activation};
 use crate::math::{PI, clamp, exp, js_max, js_min, js_sign, js_trunc_i32, pow, sqrt, tanh};
 use crate::physics::CM_H2O;
 use crate::sources::two_mass::TriangularGlottis;
@@ -265,6 +265,10 @@ pub struct HumanVoice {
     /// gestural score and voice clock (s)
     pub score: GestureScore,
     pub clock: f64,
+    /// research input (empty by default): stiffening of the two-mass folds over time, as gestures
+    /// for the timing and a fraction of the tension factor; the strongest active one sets
+    /// `folds.stiffness` each control step
+    pub stiffness_track: Vec<(Gesture, f64)>,
     blend: [Blended; N_CONTROL],
     base_abduction: f64,
     base_closure: f64,
@@ -334,6 +338,7 @@ impl HumanVoice {
             sub: 0,
             score: GestureScore::new(),
             clock: 0.0,
+            stiffness_track: Vec::new(),
             blend: [Blended::default(); N_CONTROL],
             base_abduction: 0.0,
             base_closure: 0.0,
@@ -606,6 +611,9 @@ impl HumanVoice {
             self.glottis.params.abduction = self.base_abduction;
             self.glottis.params.closure = self.base_closure;
             self.score_f0 = None;
+        }
+        if !self.stiffness_track.is_empty() {
+            self.folds.stiffness = self.stiffness_track.iter().map(|(g, s)| activation(g, t) * s).fold(0.0, js_max);
         }
         self.clock += dt;
         // contact constraint on the frame computed anyway; re-apply only if a correction was made

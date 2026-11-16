@@ -22,14 +22,32 @@ const FS: f64 = 48000.0;
 const F0: f64 = 110.0;
 
 /// F0 cycle by cycle from the glottal area; each cycle's F0 is assigned to its midpoint.
-fn track(ipa: &str, model: GlottisModel) -> (Vec<(f64, f64)>, chimera::phonetics::Plan) {
+/// Stiffening for each voiceless obstruent: the timing of its own glottal opening, carried `carry`
+/// seconds further into the next vowel, at `amount` of the tension factor.
+fn stiffening(plan: &chimera::phonetics::Plan, amount: f64, carry: f64) -> Vec<(chimera::control::score::Gesture, f64)> {
+    plan.gestures
+        .iter()
+        .filter(|g| g.label.as_ref().is_some_and(|l| ["aspiration", "voiceless"].contains(&l.as_str())))
+        .map(|g| {
+            let mut s = g.clone();
+            s.ramp_out += carry;
+            (s, amount)
+        })
+        .collect()
+}
+
+fn track(ipa: &str, model: GlottisModel, trim_loop: bool, stiff: (f64, f64)) -> (Vec<(f64, f64)>, chimera::phonetics::Plan) {
     let mut input = tokenize_ipa(ipa);
     for s in input.iter_mut() {
         s.stress = Some(0);
     }
     let plan = plan_utterance(&input, &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(F0), accent: Some(0.0), intonation: Some(Intonation::Flat), ..Default::default() });
     let mut v = HumanVoice::with_defaults(FS);
-    v.set_source(&SourcePatch { glottis: Some(model), ..Default::default() });
+    v.set_source(&SourcePatch { glottis: Some(model), vibrato_depth: Some(0.0), drift: Some(0.0), ..Default::default() });
+    v.folds.trim_loop = trim_loop;
+    if stiff.0 > 0.0 {
+        v.stiffness_track = stiffening(&plan, stiff.0, stiff.1);
+    }
     v.schedule(&plan.gestures);
     let n = (FS * (plan.end + 0.1)).round() as usize;
     let mut out = [0.0f32; 1];
@@ -66,9 +84,23 @@ fn track(ipa: &str, model: GlottisModel) -> (Vec<(f64, f64)>, chimera::phonetics
 
 fn main() {
     println!("model\tword\tC\tdip_v1\tfirst\t+5ms\t+10ms\t+20ms\t+30ms\t+40ms\tref_hz\tonset_ms");
-    for (model, name) in [(GlottisModel::Parametric, "pulse"), (GlottisModel::TwoMass, "folds")] {
+    let only_folds = std::env::args().any(|a| a == "--stiffness");
+    let mut models: Vec<(GlottisModel, String, bool, (f64, f64))> = vec![];
+    if !only_folds {
+        models.push((GlottisModel::Parametric, "pulse".into(), true, (0.0, 0.0)));
+        models.push((GlottisModel::TwoMass, "folds".into(), true, (0.0, 0.0)));
+    }
+    models.push((GlottisModel::TwoMass, "folds-noloop".into(), false, (0.0, 0.0)));
+    if only_folds {
+        for amount in [0.2, 0.4, 0.6] {
+            for carry in [0.02, 0.05] {
+                models.push((GlottisModel::TwoMass, format!("stiff{amount:.1}-c{:.0}", carry * 1000.0), false, (amount, carry)));
+            }
+        }
+    }
+    for (model, name, trim, stiff) in models {
         for (w, c) in [("apa", "p"), ("aba", "b"), ("ata", "t"), ("ada", "d"), ("aka", "k"), ("aga", "g"), ("asa", "s"), ("aza", "z"), ("afa", "f"), ("ava", "v"), ("ama", "m"), ("aha", "h")] {
-            let (f, plan) = track(w, model);
+            let (f, plan) = track(w, model, trim, stiff);
             let (v1, cs, v2) = (&plan.segments[0], &plan.segments[1], &plan.segments[2]);
             // the cycle whose midpoint is nearest, if within 6 ms
             let at = |t: f64| f.iter().min_by(|a, b| (a.0 - t).abs().total_cmp(&(b.0 - t).abs())).filter(|x| (x.0 - t).abs() < 0.006).map(|x| x.1).unwrap_or(0.0);
