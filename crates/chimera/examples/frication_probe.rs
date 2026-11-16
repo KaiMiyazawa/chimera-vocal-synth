@@ -36,6 +36,7 @@
 //!   summed turbulence amplitude is below half its mean over the fricative's middle half (the
 //!   interval's length if it never is): how long the aperiodic energy is prolonged into the vowel.
 //! - `tb_y`: mean tongue-body height over the interval.
+//!
 //! `PROBE_TB_DY` (a comma list): the vowel's tongue-body height target moved by each amount (the
 //! tongue kept), to sweep the lingual constriction across the other one; `none` is always run.
 //! `PROBE_WORDS`, `PROBE_DURS` (ms), `PROBE_VOICED_ONLY=1` (no devoiced rows), `PROBE_JUNCTION=1`
