@@ -24,7 +24,7 @@
 //! time the tract is shut (narrowest area below 0.01 cm²). Measures there:
 //! - `open_ms`: that interval's length; the axis to compare with acoustic vowel durations.
 //! - `voiced`: share of 20 ms frames (5 ms hop) centred in it in which the output is periodic
-//!   (YIN aperiodicity below 0.30, 100–300 Hz) and louder than −35 dB re the loudest frame; empty
+//!   (YIN aperiodicity below 0.30, `PROBE_YIN_MIN`–300 Hz) and louder than −35 dB re the loudest frame; empty
 //!   below 20 ms. Normalise by the voiced controls before comparing words.
 //! - `gate`, `p_gate`: the glottis model's voicing gate and its pressure factor (the model's rule).
 //! - `ps`, `pg`, `dp` (cmH₂O): mean subglottal pressure (trachea's last node), supraglottal
@@ -45,6 +45,11 @@
 //! default the engine's 0.5; 0 makes the rest area equal the abduction asked for);
 //! `PROBE_LUNG_R` (factor on the lungs' series resistance, default 1); `PROBE_TRACE` (`word,ms`:
 //! for that word and nominal length, unaspirated, frame by frame around the release, to stderr);
+//! `PROBE_RELEASE_AREA` (the narrowest area below which the tract counts as shut, default 0.01
+//! cm²); `PROBE_DURS` (nominal lengths, ms, a comma list); `PROBE_ONSET_ONLY=1` (unaspirated, no
+//! advance, tongue target, no peaks: the onset comparison only);
+//! `PROBE_LOCK_OFFSET_MS` (with the lock, the openings move by this much more: is the result kept
+//! when they sit a little earlier or later against the release?);
 //! `PROBE_LOCK_RELEASE=1` (the first consonant's glottal openings move with where its release
 //! falls, found in a first pass: the openings are timed to the release, not the plan).
 //!
@@ -82,6 +87,14 @@ struct Cond {
 struct Row {
     /// the open interval's start minus the planned vowel's start (s)
     start: f64,
+    /// how far the first consonant's openings were moved (s; `PROBE_LOCK_RELEASE`)
+    shift: f64,
+    /// from the open interval's start to the folds' first closure that is followed by another
+    /// within 20 ms (folds), or to the first block whose voicing gate is above one half (cutoff,
+    /// threshold): the onset in the model, at sample or block (1.3 ms) resolution
+    onset_ms: Option<f64>,
+    /// as `lead_ms`, with 20 ms frames on a 1 ms hop
+    lead1_ms: Option<f64>,
     lead_ms: Option<f64>,
     tail_ms: Option<f64>,
     states: Option<(f64, f64, f64)>,
@@ -113,8 +126,9 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
     if !settings().lock_release || first.open_ms == 0.0 {
         return Some(first);
     }
-    let mut r = probe_once(word, Cond { shift: first.start, ..c })?;
+    let mut r = probe_once(word, Cond { shift: first.start + settings().lock_offset, ..c })?;
     r.start = first.start;
+    r.shift = first.start + settings().lock_offset;
     Some(r)
 }
 
@@ -214,7 +228,7 @@ fn probe_once(word: &str, c: Cond) -> Option<Row> {
         let t = (i + BLOCK / 2) as f64 / FS;
         let f = v.airway.frame.as_ref().expect("the airway publishes a frame every block");
         let amin = f.grid.iter().map(|g| g.area).fold(f64::MAX, f64::min);
-        let shut = amin < 0.01;
+        let shut = amin < st.release_area;
         let chmin = if c.folds { ch[i..].iter().cloned().fold(f64::MAX, f64::min) } else { f64::NAN };
         let released = g0.as_ref().is_none_or(|g| activation(g, t) < 0.5);
         let not_closing = g1.as_ref().is_none_or(|g| activation(g, t) < 0.5);
@@ -257,6 +271,24 @@ fn probe_once(word: &str, c: Cond) -> Option<Row> {
     let is_voiced = |f: &(f64, f64, f64, usize)| f.2 < 0.3 && db(f.1) > -35.0;
     let voiced = (o1 - o0 >= 0.02 && !inside.is_empty()).then(|| inside.iter().filter(|f| is_voiced(f)).count() as f64 / inside.len() as f64);
     let lead_ms = inside.iter().find(|f| is_voiced(f)).map(|f| (f.0 - o0) * 1000.0);
+    // the onset in the model
+    let onset_ms = if c.folds {
+        let (s0, s1) = (((o0 * FS) as usize).min(ch.len()), ((o1 * FS) as usize).min(ch.len()));
+        let shut_at: Vec<usize> = (s0.max(1)..s1).filter(|&j| ch[j] <= 1e-4 && ch[j - 1] > 1e-4).collect();
+        shut_at.windows(2).find(|w| w[1] - w[0] <= (0.02 * FS) as usize).map(|w| (w[0] as f64 / FS - o0) * 1000.0)
+    } else {
+        w.iter().find(|b| b.gate > 0.5).map(|b| (b.t - o0) * 1000.0)
+    };
+    let lead1_ms = ((o0 * FS) as usize..((o1 * FS) as usize).min(n.saturating_sub(win)))
+        .step_by((0.001 * FS) as usize)
+        .map(|s| {
+            let x: Vec<f64> = out[s..s + win].iter().map(|&y| y as f64).collect();
+            let rms = (x.iter().map(|y| y * y).sum::<f64>() / win as f64).sqrt();
+            let p = yin_pitch(&x, FS, YinOpts { min_f0: Some(st.yin_min), max_f0: Some(300.0), threshold: None });
+            ((s + win / 2) as f64 / FS, rms, p.aperiodicity, s)
+        })
+        .find(|f| f.0 >= o0 && is_voiced(f))
+        .map(|f| (f.0 - o0) * 1000.0);
     let tail_ms = inside.iter().rev().find(|f| is_voiced(f)).map(|f| (o1 - f.0) * 1000.0);
     let states = (c.folds && !inside.is_empty()).then(|| {
         let (mut close, mut swing) = (0usize, 0usize);
@@ -286,7 +318,7 @@ fn probe_once(word: &str, c: Cond) -> Option<Row> {
             eprintln!("block\t{gl}\t{word}\t{:.1}\t\t\t\t{:.4}\t{:.2}\t{:.2}\t{:.2}\t{:.4}\t{:.5}", (b.t - o0) * 1000.0, b.amin, b.ps, b.pg, b.ps - b.pg, b.abd, b.chmin);
         }
     }
-    Some(Row { start: o0 - t0, lead_ms, tail_ms, states, open_ms: (o1 - o0) * 1000.0, voiced, gate: mean(&|b| b.gate), p_gate: mean(&|b| b.p_gate), ps: mean(&|b| b.ps), pg: mean(&|b| b.pg), abd: mean(&|b| b.abd), tb_y: mean(&|b| b.tb_y) })
+    Some(Row { start: o0 - t0, shift: c.shift, onset_ms, lead1_ms, lead_ms, tail_ms, states, open_ms: (o1 - o0) * 1000.0, voiced, gate: mean(&|b| b.gate), p_gate: mean(&|b| b.p_gate), ps: mean(&|b| b.ps), pg: mean(&|b| b.pg), abd: mean(&|b| b.abd), tb_y: mean(&|b| b.tb_y) })
 }
 
 /// Settings read from the environment (see the module comment).
@@ -298,6 +330,10 @@ struct Settings {
     lung_r: f64,
     trace: Option<(String, f64)>,
     lock_release: bool,
+    release_area: f64,
+    lock_offset: f64,
+    durs: Option<Vec<f64>>,
+    onset_only: bool,
 }
 
 static SETTINGS: std::sync::OnceLock<Settings> = std::sync::OnceLock::new();
@@ -318,6 +354,10 @@ fn settings() -> &'static Settings {
             abduct_rest: num("PROBE_ABDUCT_REST"),
             lung_r: num("PROBE_LUNG_R").unwrap_or(1.0),
             lock_release: env("PROBE_LOCK_RELEASE").is_some_and(|v| v == "1"),
+            release_area: num("PROBE_RELEASE_AREA").unwrap_or(0.01),
+            lock_offset: num("PROBE_LOCK_OFFSET_MS").unwrap_or(0.0) / 1000.0,
+            durs: env("PROBE_DURS").map(|v| v.split(',').map(|x| x.trim().parse::<f64>().expect("PROBE_DURS: ms") / 1000.0).collect()),
+            onset_only: env("PROBE_ONSET_ONLY").is_some_and(|v| v == "1"),
             trace: env("PROBE_TRACE").map(|v| {
                 let (w, d) = v.split_once(',').expect("PROBE_TRACE: word,nominal_ms");
                 (w.trim().to_string(), d.trim().parse().expect("PROBE_TRACE: nominal ms, a number"))
@@ -371,25 +411,27 @@ fn main() {
     let peaked = ["kita", "kɯta", "kɯɕa"];
     // with PROBE_TRACE only the traced condition is run
     let traced = st.trace.as_ref().map(|t| t.1 / 1000.0);
-    let durs: Vec<f64> = if let Some(d) = traced { vec![d] } else if quick { vec![0.06, 0.1, 0.16] } else { (4..=20).map(|d| d as f64 * 0.01).collect() };
-    let vots: Vec<Option<f64>> = if traced.is_some() { vec![None] } else { vec![None, Some(0.03), Some(0.05)] };
+    let durs: Vec<f64> = if let Some(d) = traced { vec![d] } else if let Some(ds) = &st.durs { ds.clone() } else if quick { vec![0.06, 0.1, 0.16] } else { (4..=20).map(|d| d as f64 * 0.01).collect() };
+    let narrow = traced.is_some() || st.onset_only;
+    let vots: Vec<Option<f64>> = if narrow { vec![None] } else { vec![None, Some(0.03), Some(0.05)] };
     let glottises: Vec<String> = std::env::var("PROBE_GLOTTIS").unwrap_or_else(|_| "cutoff,threshold".into()).split(',').map(|g| g.trim().to_string()).collect();
     assert!(glottises.iter().all(|g| ["cutoff", "threshold", "folds"].contains(&g.as_str())), "PROBE_GLOTTIS: cutoff, threshold, folds");
     let rev = std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
-    let dirty = std::process::Command::new("git").args(["status", "--porcelain", "--untracked-files=no"]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
+    let dirty = std::process::Command::new("git").args(["status", "--porcelain", "--", "crates"]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
     println!("# devoicing_probe at {}{}", rev.trim(), if dirty { " (uncommitted changes)" } else { "" });
     println!("# male, f0 {F0} Hz, Breath 8 cmH2O, frame e_X_to, no stress, fs {FS}; glottis cutoff = engine default, threshold = research option (8 cmH2O/cm2 above 0.045 cm2), folds = two-mass; peak strength 2");
     println!(
-        "# run: glottis {}; words {}; YIN min {} Hz; folds loop {}; abduct_rest {}; lung resistance x{}; openings locked to the release {}",
+        "# run: glottis {}; words {}; YIN min {} Hz; folds loop {}; abduct_rest {}; lung resistance x{}; openings locked to the release {}; release area {} cm2",
         glottises.join(","),
         st.words.as_ref().map_or("all".to_string(), |w| w.join(",")),
         st.yin_min,
         st.frozen_trim.map_or("on".to_string(), |t| format!("frozen (trim {t:.4})")),
         st.abduct_rest.map_or("engine".to_string(), |a| a.to_string()),
         st.lung_r,
-        st.lock_release
+        st.lock_release,
+        st.release_area
     );
-    println!("block\tword\tgroup\tglottis\tvot\tadv_ms\tlarynx\ttongue\tnominal_ms\topen_ms\tvoiced\tgate\tp_gate\tps\tpg\tdp\tabd\ttb_y\tlead_ms\ttail_ms\tf_close\tf_swing\tf_still");
+    println!("block\tword\tgroup\tglottis\tvot\tadv_ms\tlarynx\ttongue\tnominal_ms\topen_ms\tvoiced\tgate\tp_gate\tps\tpg\tdp\tabd\ttb_y\tlead_ms\ttail_ms\tf_close\tf_swing\tf_still\tstart_ms\tshift_ms\tonset_ms\tlead1_ms");
     let rows: Vec<Vec<String>> = std::thread::scope(|sc| {
         let handles: Vec<_> = words
             .iter()
@@ -407,15 +449,16 @@ fn main() {
                         let opt = |x: Option<f64>, d: usize| x.map_or(String::new(), |x| format!("{x:.d$}"));
                         let (gate, p_gate) = if folds { (String::new(), String::new()) } else { (format!("{:.3}", r.gate), format!("{:.3}", r.p_gate)) };
                         let states = r.states.map_or("\t\t".to_string(), |(a, b, c)| format!("{a:.3}\t{b:.3}\t{c:.3}"));
+                        let extra = format!("{:.1}\t{:.1}\t{}\t{}", r.start * 1000.0, r.shift * 1000.0, opt(r.onset_ms, 1), opt(r.lead1_ms, 1));
                         lines.push(format!(
-                            "{block}\t{w}\t{grp}\t{}\t{vot_s}\t{:.0}\t{lar}\t{}\t{:.0}\t{:.1}\t{voiced}\t{gate}\t{p_gate}\t{:.2}\t{:.2}\t{:.2}\t{:.3}\t{:.3}\t{}\t{}\t{states}",
+                            "{block}\t{w}\t{grp}\t{}\t{vot_s}\t{:.0}\t{lar}\t{}\t{:.0}\t{:.1}\t{voiced}\t{gate}\t{p_gate}\t{:.2}\t{:.2}\t{:.2}\t{:.3}\t{:.3}\t{}\t{}\t{states}\t{extra}",
                             glottis,
                             c.adv * 1000.0,
                             if c.tongue_none { "none" } else { "target" },
                             c.dur * 1000.0, r.open_ms, r.ps, r.pg, r.ps - r.pg, r.abd, r.tb_y, opt(r.lead_ms, 1), opt(r.tail_ms, 1)
                         ));
                     };
-                    let traced = traced.is_some();
+                    let traced = narrow;
                     for &vot in vots {
                         for adv in if traced { vec![0.0] } else { vec![0.0, 0.02, 0.04, 0.06] } {
                             for tongue_none in if traced { vec![false] } else { vec![false, true] } {

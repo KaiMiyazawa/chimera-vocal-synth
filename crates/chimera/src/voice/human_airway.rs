@@ -49,6 +49,11 @@ pub struct HumanAirway {
     pub dx_stable: f64,
     /// noise gains (tunable)
     pub noise_gain: NoiseGains,
+    /// Research option, off by default (the engine's sound unchanged): a narrowest point at, or
+    /// within the source's reach of, the oral tube's first section (just past the velum) gets its
+    /// frication source. Off, that section maps to no branch, so the source (and the teeth source
+    /// with it) is dropped whenever the point, or its upstream or downstream reach, lands there.
+    pub junction_noise: bool,
     /// max area change rate (cm²/s, body-scaled): a physiological guard against geometric jumps
     pub max_area_rate: f64,
     /// additional rate per cm² of current area (1/s)
@@ -151,6 +156,7 @@ impl HumanAirway {
             or_len: 8.3,
             dx_stable: (C_SOUND / fs) / 0.97,
             noise_gain: NoiseGains { glottis: 3.2e-6, constriction: 2.2e-6, teeth: 3.0e-6 },
+            junction_noise: false,
             max_area_rate: 45.0,
             area_rate_gain: 40.0,
             seal_rate: 5.0,
@@ -311,7 +317,7 @@ impl HumanAirway {
             let to_branch = |gi: isize| -> isize {
                 if gi < n_ph_i {
                     self.branch_of(self.pharynx, gi) as isize
-                } else if gi == n_ph_i {
+                } else if gi == n_ph_i && !self.junction_noise {
                     -1
                 } else {
                     self.branch_of(self.oral, gi - n_ph_i) as isize

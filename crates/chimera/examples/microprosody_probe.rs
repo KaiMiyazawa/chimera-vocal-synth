@@ -16,7 +16,11 @@
 //! changes), so nothing is reported there.
 //! `--early`: the stiffening timed to beat the first cycle (see `early_table`). `--cubic` gives
 //! the folds the cubic springs and contact of Ishizaka & Flanagan 1972 (100 and 500 cm⁻²).
-//! Run: `cargo run --release -q -p chimera --example microprosody_probe [-- --stiffness | --early] [--cubic] > out.tsv`
+//! `--bz`: the output sound read the way Birkholz & Zhang 2020 read theirs (an autocorrelation-type
+//! pitch reader, 50–200 Hz, 60 ms windows; F0 at 8 points 5–75 ms after the voicing onset; the
+//! straight line fitted to the 45–75 ms points subtracted), so the model and their curve
+//! (+11.1·exp(−95.9 t) Hz, one German male speaker) are compared on the same footing.
+//! Run: `cargo run --release -q -p chimera --example microprosody_probe [-- --stiffness | --early | --bz] [--cubic] > out.tsv`
 use chimera::phonetics::Intonation;
 use chimera::phonetics::ipa::tokenize_ipa;
 use chimera::phonetics::planner::{PlanOptions, plan_utterance};
@@ -163,6 +167,10 @@ fn main() {
     ];
     if std::env::args().any(|a| a == "--cubic") {
         CUBIC.set((100.0, 500.0)).ok();
+    }
+    if std::env::args().any(|a| a == "--bz") {
+        bz_table(&items);
+        return;
     }
     if std::env::args().any(|a| a == "--early") {
         early_table(&items);
@@ -341,6 +349,98 @@ fn early_table(items: &[(&str, &str, Option<bool>)]) {
                         cell(4),
                         if shape { "yes" } else { "no" }
                     )
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for l in lines {
+        println!("{l}");
+    }
+}
+
+/// Points (s after the voicing onset) at which the output F0 is read in `--bz`.
+const BZ_POINTS: [f64; 8] = [0.005, 0.015, 0.025, 0.035, 0.045, 0.055, 0.065, 0.075];
+
+/// The output's F0 at `BZ_POINTS` after the voicing onset (the start of the first cycle after the
+/// release), read by YIN over 60 ms windows (50–200 Hz) centred on each point, less the straight
+/// line fitted to the points at 45 ms and later; None where a point is not periodic.
+fn bz_curve(ipa: &str, aspirated: Option<bool>, src: Src, offset: f64) -> Vec<Option<f64>> {
+    use chimera::analysis::pitch::{YinOpts, yin_pitch};
+    let mut input = tokenize_ipa(ipa);
+    input[0].dur = Some(0.5);
+    for s in input.iter_mut() {
+        s.stress = Some(0);
+        if ["p", "t", "k"].contains(&s.ipa.as_str()) {
+            s.aspirated = aspirated;
+        }
+    }
+    let plan = plan_utterance(&input, &PlanOptions { body: "male".into(), t0: 0.05 + offset, f0: Some(F0), accent: Some(0.0), intonation: Some(Intonation::Flat), ..Default::default() });
+    let c = plan.segments[1].clone();
+    let mut v = HumanVoice::with_defaults(FS);
+    let model = if src == Src::Pulse { GlottisModel::Parametric } else { GlottisModel::TwoMass };
+    v.set_source(&SourcePatch { glottis: Some(model), roughness: Some(0.0), vibrato_depth: Some(0.0), drift: Some(0.0), ..Default::default() });
+    (v.folds.spring_cubic, v.folds.contact_cubic) = *CUBIC.get().unwrap_or(&(0.0, 0.0));
+    v.schedule(&plan.gestures);
+    let n = (FS * (plan.end + 0.05)) as usize;
+    let freeze = ((c.t0 - 0.1) * FS) as usize;
+    let mut out = vec![0.0f32; n];
+    let mut y = Vec::with_capacity(n);
+    for i in 0..n {
+        if src == Src::Frozen && i == freeze {
+            v.folds.trim_loop = false;
+        }
+        v.render(&mut out[i..i + 1]);
+        y.push(if src == Src::Pulse { v.glottis.area } else { v.folds.displacement() });
+    }
+    let (half, prom) = ((0.0025 * FS) as usize, if src == Src::Pulse { 0.003 } else { 0.002 });
+    let cyc = cycles_from_peaks(&y, half, prom);
+    let Some(first) = cyc.iter().find(|x| x.0 >= c.t1 - 0.005).copied() else { return vec![None; BZ_POINTS.len()] };
+    let onset = first.0 - 0.5 / first.1;
+    let win = (0.06 * FS) as usize;
+    let f0s: Vec<Option<f64>> = BZ_POINTS
+        .iter()
+        .map(|&p| {
+            let mid = ((onset + p) * FS) as usize;
+            let a = mid.checked_sub(win / 2)?;
+            let x: Vec<f64> = out.get(a..a + win)?.iter().map(|&s| s as f64).collect();
+            let r = yin_pitch(&x, FS, YinOpts { min_f0: Some(50.0), max_f0: Some(200.0), threshold: None });
+            (r.aperiodicity < 0.45 && r.f0 > 0.0).then_some(r.f0)
+        })
+        .collect();
+    let tail: Vec<(f64, f64)> = BZ_POINTS.iter().zip(&f0s).filter(|(t, _)| **t >= 0.045).filter_map(|(t, f)| f.map(|f| (*t, f))).collect();
+    if tail.len() < 2 {
+        return vec![None; BZ_POINTS.len()];
+    }
+    let (mt, mf) = (tail.iter().map(|x| x.0).sum::<f64>() / tail.len() as f64, tail.iter().map(|x| x.1).sum::<f64>() / tail.len() as f64);
+    let slope = tail.iter().map(|x| (x.0 - mt) * (x.1 - mf)).sum::<f64>() / tail.iter().map(|x| (x.0 - mt).powi(2)).sum::<f64>();
+    BZ_POINTS.iter().zip(f0s).map(|(t, f)| f.map(|f| f - (mf + slope * (t - mt)))).collect()
+}
+
+fn bz_table(items: &[(&str, &str, Option<bool>)]) {
+    let rev = std::process::Command::new("git").args(["describe", "--always", "--dirty"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+    println!("# microprosody_probe --bz at {}; cubic {:?}", rev.trim(), CUBIC.get());
+    println!("# output F0 read as Birkholz & Zhang 2020 read theirs (YIN 50-200 Hz, 60 ms windows, 8 points 5-75 ms after the voicing onset, line fitted to 45-75 ms subtracted); mean over 10 start offsets (n = offsets with a value)");
+    let human: Vec<String> = BZ_POINTS.iter().map(|t| format!("{:+.1}", 11.1 * (-95.9 * t).exp())).collect();
+    println!("source\titem\tC\t{}", BZ_POINTS.iter().map(|t| format!("{:.0}ms", t * 1000.0)).collect::<Vec<_>>().join("\t"));
+    println!("human(B&Z)\t-\t-\t{}", human.join("\t"));
+    let jobs: Vec<(Src, &str, &str, Option<bool>)> = [Src::Pulse, Src::Frozen].iter().flat_map(|&s| items.iter().map(move |&(w, c, a)| (s, w, c, a))).collect();
+    let lines: Vec<String> = std::thread::scope(|sc| {
+        let hs: Vec<_> = jobs
+            .iter()
+            .map(|&(src, w, c, asp)| {
+                sc.spawn(move || {
+                    let runs: Vec<Vec<Option<f64>>> = (0..10).map(|o| bz_curve(w, asp, src, o as f64 * 0.001)).collect();
+                    let cells: Vec<String> = (0..BZ_POINTS.len())
+                        .map(|k| {
+                            let xs: Vec<f64> = runs.iter().filter_map(|r| r[k]).collect();
+                            if xs.is_empty() {
+                                return "-".to_string();
+                            }
+                            format!("{:+.1}{}", xs.iter().sum::<f64>() / xs.len() as f64, if xs.len() < runs.len() { format!(" n={}", xs.len()) } else { String::new() })
+                        })
+                        .collect();
+                    format!("{}\t{w}\t{c}\t{}", if src == Src::Pulse { "pulse" } else { "folds-frozen" }, cells.join("\t"))
                 })
             })
             .collect();
