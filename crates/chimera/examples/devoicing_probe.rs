@@ -126,6 +126,7 @@ fn probe(word: &str, dur: f64, vot: Option<f64>, larynx: Larynx, tongue_none: bo
         }
     }
     let mut v = HumanVoice::with_defaults(FS);
+    v.set_opening_threshold(true);
     v.schedule(&plan.gestures);
     let n = (FS * (plan.end + 0.1)).round() as usize;
     let mut out = vec![0.0f32; n];
@@ -184,7 +185,7 @@ fn main() {
     let rev = std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
     let dirty = std::process::Command::new("git").args(["status", "--porcelain", "--untracked-files=no"]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
     println!("# devoicing_probe at {}{}", rev.trim(), if dirty { " (uncommitted changes)" } else { "" });
-    println!("# male, f0 {F0} Hz, frame e_X_to, no stress, fs {FS}, own opening {OWN_DEFAULT} cm2 (swept in the own-sweep block)");
+    println!("# male, f0 {F0} Hz, Breath 8 cmH2O, opening-dependent phonation threshold (research option), frame e_X_to, no stress, fs {FS}, own opening {OWN_DEFAULT} cm2 (swept in the own-sweep block)");
     println!("block\tword\tgroup\tcontext\tvot\tlarynx\ttongue\tvowel_ms\tvoiced15\tvoiced30\tvoiced45\trms_db\tgate\tp_gate\ta_gate\tp_th\tabd\tclosed\ttb_y");
     let rows: Vec<Vec<String>> = std::thread::scope(|sc| {
         let handles: Vec<_> = words

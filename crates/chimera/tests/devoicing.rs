@@ -6,7 +6,7 @@ use chimera::phonetics::ipa::{skipped_ipa, tokenize_ipa};
 use chimera::phonetics::planner::{PlanOptions, plan_utterance};
 use chimera::phonetics::sing::{NoteOnOptions, SongOptions, SungNote, plan_note_on, plan_song};
 use chimera::phonetics::{Plan, Segment, Syllable};
-use chimera::voice::human_voice::HumanVoice;
+use chimera::voice::human_voice::{HumanVoice, SourcePatch};
 
 const FS: f64 = 48000.0;
 const BLOCK: usize = 64;
@@ -27,7 +27,15 @@ fn plan(segs: &[Segment]) -> Plan {
 
 /// Mean of the voicing gate (0..1) over the segment at `k`.
 fn voicing(p: &Plan, k: usize) -> f64 {
+    voicing_with(p, k, false, 8.0, 1.0)
+}
+
+/// The same with the opening-dependent threshold on or off, and the breath (cmH₂O) and gate.
+fn voicing_with(p: &Plan, k: usize, opening_threshold: bool, breath: f64, gate: f64) -> f64 {
     let mut v = HumanVoice::with_defaults(FS);
+    v.set_opening_threshold(opening_threshold);
+    v.set_source(&SourcePatch { pressure: Some(breath), ..Default::default() });
+    v.set_gate(gate);
     v.schedule(&p.gestures);
     let n = (FS * (p.end + 0.1)).round() as usize;
     let mut out = vec![0.0f32; n];
@@ -157,20 +165,34 @@ fn a_targetless_rhotic_vowel_does_not_pre_place_a_closure() {
     assert!((t0(&plain_vowel) - start_of(&plain_vowel)).abs() < 1e-9);
 }
 
-/// Bug (ea59a5a): a threshold rising in proportion to the opening silenced breathy vowels (their
-/// 0.1 cm² opening, between voiced consonants, left the gate at 0.06). The opening-dependent
-/// threshold must keep breathy voice and stop the folds for /h/ and voiceless obstruents.
+/// Both voicing models (the default area cutoff, and the opening-dependent threshold, a research
+/// option) keep breathy voice and stop the folds for /h/ and voiceless obstruents at the default
+/// breath. A threshold rising in proportion to the opening (ea59a5a) silenced breathy vowels
+/// (0.93 → 0.06); these bars are the area cutoff's own values (71381df).
 #[test]
-fn the_opening_dependent_threshold_keeps_breathy_voice_and_stops_voiceless_sounds() {
-    let mid = |ipa: &str| voicing(&plan(&tokenize_ipa(ipa)), 1);
-    // the bars are the area-cutoff engine's own values (71381df: 1.00, 0.93, 0.67; /ɦ/ is short,
-    // so its mean includes the transitions into and out of it)
-    for (ipa, what, at_least) in [("ˈbada", "modal /a/", 0.95), ("ˈba\u{324}da", "breathy /a/", 0.9), ("ˈbɦada", "/ɦ/", 0.6)] {
-        let g = mid(ipa);
-        assert!(g > at_least, "{what} in {ipa}: voicing {g:.2}");
+fn both_voicing_models_keep_breathy_voice_and_stop_voiceless_sounds() {
+    for on in [false, true] {
+        let mid = |ipa: &str| voicing_with(&plan(&tokenize_ipa(ipa)), 1, on, 8.0, 1.0);
+        for (ipa, what, at_least) in [("ˈbada", "modal /a/", 0.95), ("ˈba\u{324}da", "breathy /a/", 0.9), ("ˈbɦada", "/ɦ/", 0.6)] {
+            let g = mid(ipa);
+            assert!(g > at_least, "opening threshold {on}: {what} in {ipa}: voicing {g:.2}");
+        }
+        for (ipa, what) in [("ˈaha", "/h/"), ("ˈasa", "/s/"), ("ˈaɸa", "/ɸ/"), ("ˈaɕa", "/ɕ/"), ("ˈapa", "/p/")] {
+            let g = mid(ipa);
+            assert!(g < 0.1, "opening threshold {on}: {what} in {ipa}: voicing {g:.2}");
+        }
     }
-    for (ipa, what) in [("ˈaha", "/h/"), ("ˈasa", "/s/"), ("ˈaɸa", "/ɸ/"), ("ˈaɕa", "/ɕ/"), ("ˈapa", "/p/")] {
-        let g = mid(ipa);
-        assert!(g < 0.1, "{what} in {ipa}: voicing {g:.2}");
+}
+
+/// The default model keeps voiceless sounds voiceless at the loudest breath the controls give
+/// (Breath 22 × gate 1.5); the opening-dependent threshold does not (it is a research option).
+#[test]
+fn the_default_voicing_model_keeps_loud_voiceless_sounds_voiceless() {
+    for (ipa, what) in [("ˈaha", "/h/"), ("ˈasa", "/s/"), ("ˈaɸa", "/ɸ/"), ("ˈaɕa", "/ɕ/")] {
+        let p = plan(&tokenize_ipa(ipa));
+        let loud = voicing_with(&p, 1, false, 22.0, 1.5);
+        assert!(loud < 0.05, "default model: {what} at Breath 22 × 1.5: voicing {loud:.2}");
     }
+    let h = voicing_with(&plan(&tokenize_ipa("ˈaha")), 1, true, 22.0, 1.5);
+    assert!(h > 0.5, "the research option's known limit moved: /h/ at Breath 22 × 1.5 now {h:.2}");
 }

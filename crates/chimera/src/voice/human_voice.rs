@@ -52,11 +52,11 @@ fn default_brightness() -> f64 {
 /// threshold stays at its modal value; Lucero's rise toward zero width (viscous losses) is not
 /// modelled, because the source's static opening is not a prephonatory width at modal voice.
 const THRESHOLD_AREA: f64 = 0.045;
-/// how fast the threshold rises above `THRESHOLD_AREA` (cmH₂O per cm² of opening): 0.22 kPa per mm
-/// of half-width for a 1.4 cm fold, within the span physical models of the mucosa give (Chan,
-/// Titze & Titze 1997). Set inside the engine's own bounds: a breathy vowel (0.10 cm², about
-/// 5.2 cmH₂O across the glottis) keeps voicing, and /h/ and the voiceless fricatives (0.30–0.33
-/// cm², 0.5–2.2 cmH₂O across it) stop it.
+/// how fast the threshold rises above `THRESHOLD_AREA` (cmH₂O per cm² of opening). Not taken from
+/// the literature: about six tenths of the straight part of Lucero 1996's Fig. 3 (≈13 cmH₂O per cm²
+/// for a 1.4 cm fold), set inside the engine's own bounds at Breath 8 cmH₂O: a breathy vowel
+/// (0.10 cm², 4.6–5.2 cmH₂O across the glottis) keeps voicing, and /h/ and the voiceless
+/// fricatives (0.30–0.33 cm², 0.5–2.2 cmH₂O across it) stop it.
 const THRESHOLD_SLOPE: f64 = 8.0;
 
 pub const DEFAULT_SOURCE: VoiceSource = VoiceSource { f0: 110.0, glide: 0.06, pressure: 8.0, breathiness: 0.15, tension: 0.5, fry: 0.0, roughness: 0.1, vibrato_depth: 0.0, vibrato_rate: 6.0, drift: 5.0, voiced: true, brightness: 0.25 };
@@ -180,6 +180,12 @@ pub struct HumanVoice {
     p_lung_step: f64,
     f0: f64,
     pub output_gain: f64,
+    /// research option (off by default): the folds stop through an opening-dependent phonation
+    /// threshold instead of an area cutoff. Off, the voice is the one it always was. On, voiceless
+    /// sounds voice at high breath pressure (Breath 22 × gate 1.5: /h/ and /ɸ/ fully, /ɕ/ mostly),
+    /// because the transglottal pressure grows with the lung pressure and the threshold does not;
+    /// see [`HumanVoice::set_opening_threshold`]
+    opening_threshold: bool,
     dc_x: f64,
     dc_y: f64,
     dc_coef: f64,
@@ -246,6 +252,7 @@ impl HumanVoice {
             p_lung_step: 0.0,
             f0: DEFAULT_SOURCE.f0,
             output_gain: 5.5e-7,
+            opening_threshold: false,
             dc_x: 0.0,
             dc_y: 0.0,
             dc_coef: exp((-2.0 * PI * 25.0) / fs_out),
@@ -323,6 +330,13 @@ impl HumanVoice {
     }
 
     /// breath/voice on (1) or off (0); intermediate values scale the pressure
+    /// Research option: stop the folds through a phonation threshold that rises with the glottal
+    /// opening (see `THRESHOLD_AREA`) instead of the area cutoff. Off by default.
+    pub fn set_opening_threshold(&mut self, on: bool) {
+        self.opening_threshold = on;
+        self.apply_source();
+    }
+
     pub fn set_gate(&mut self, level: f64) {
         self.gate_target = clamp(level, 0.0, 1.5);
     }
@@ -339,7 +353,9 @@ impl HumanVoice {
         // the arytenoids through the closed phase (Södersten & Lindestad 1990). It leaks a little
         // air and damps the tract, which lifts H1 and the band below 500 Hz.
         g.chink = (0.008 + 0.03 * s.breathiness) * k2;
-        g.threshold_area = THRESHOLD_AREA * k2;
+        // the opening-dependent threshold is a research option; 0 keeps the area cutoff. The
+        // reference area and slope are in the engine's opening units (a male cm² times k²)
+        g.threshold_area = if self.opening_threshold { THRESHOLD_AREA * k2 } else { 0.0 };
         g.threshold_slope = THRESHOLD_SLOPE * CM_H2O / k2;
         g.open_quotient = 0.78 - 0.36 * s.tension;
         // The folds close along their length and depth over a return phase, not all at once, so

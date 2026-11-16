@@ -9,9 +9,10 @@
 //!    human voice), it does so through the pressures: a wide glottis passes more air, so the
 //!    transglottal pressure the network computes falls (in /h/ to about 2 cmH₂O, under a fricative
 //!    or stop closure to 0–2), and above that opening the threshold also rises linearly with it
-//!    (`threshold_slope`; the threshold grows with the prephonatory half-width and does not fall to
-//!    zero as it narrows: Titze 1988, Lucero 1996, Chan & Titze 2006). Without it (the creatures),
-//!    an opening above 0.08–0.22 cm² stops them.
+//!    (`threshold_slope`; the threshold grows about linearly with the prephonatory half-width above
+//!    the width of easiest phonation: Titze 1988's small-amplitude result, extended by Lucero 1996).
+//!    Without it (the creatures, and the human voice by default), an opening above 0.08–0.22 cm²
+//!    stops them.
 
 use crate::math::{Drift, PI, Rng, TAU, clamp, cos, exp, js_max, js_min, pow, sin, smoothstep};
 use crate::physics::CM_H2O;
@@ -151,7 +152,7 @@ impl ParametricGlottis {
             static_sm: 0.0,
             pressure_gate: 0.0,
             adduct_gate: 0.0,
-            threshold_now: 2.5 * CM_H2O,
+            threshold_now: 2.5 * CM_H2O, // overwritten by the first `next()`
             closure_sm: 0.0,
             amp_sm: 0.0,
             sm_coef: 1.0 - exp(-1.0 / (0.004 * fs)),
