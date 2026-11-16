@@ -20,8 +20,9 @@
 //!   aperiodic, so a fully voiced vowel scores well below 1. Compare with the voiced controls.
 //! - `rms_db`: the vowel's level re the loudest frame.
 //! - `gate`: the glottis model's voicing gate (0..1), and its factors before smoothing:
-//!   `p_gate` (transglottal pressure over the phonation threshold) and `a_gate` (folds close
-//!   enough: 1 below 0.08 cm² static abduction, 0 above 0.22). The model's rule, not the sound.
+//!   `p_gate` (transglottal pressure over the phonation threshold, which for the human voice
+//!   rises with the opening) and `a_gate` (the creatures' area cutoff; always 1 for the human
+//!   voice). The model's rule, not the sound. `p_th`: the mean threshold in force (cmH₂O).
 //! - `abd`: mean static abduction the gate reads (cm²). `closed`: share of the vowel with the tract
 //!   shut somewhere (narrowest area < 0.01 cm²). `tb_y`: mean tongue-body height.
 //!
@@ -32,6 +33,7 @@ use chimera::anatomy::human::ArticKey;
 use chimera::control::score::{ControlKey, Gesture, Targets};
 use chimera::phonetics::ipa::tokenize_ipa;
 use chimera::phonetics::planner::{PlanOptions, is_vowel, plan_utterance};
+use chimera::physics::CM_H2O;
 use chimera::voice::human_voice::HumanVoice;
 
 const FS: f64 = 48000.0;
@@ -65,6 +67,7 @@ struct Row {
     gate: f64,
     p_gate: f64,
     a_gate: f64,
+    p_th: f64,
     abd: f64,
     closed: f64,
     tb_y: f64,
@@ -126,12 +129,13 @@ fn probe(word: &str, dur: f64, vot: Option<f64>, larynx: Larynx, tongue_none: bo
     v.schedule(&plan.gestures);
     let n = (FS * (plan.end + 0.1)).round() as usize;
     let mut out = vec![0.0f32; n];
-    let (mut gate, mut p_gate, mut a_gate, mut abd, mut closed, mut tb_y) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+    let (mut gate, mut p_gate, mut a_gate, mut p_th, mut abd, mut closed, mut tb_y) = (vec![], vec![], vec![], vec![], vec![], vec![], vec![]);
     for i in (0..n).step_by(BLOCK) {
         v.render(&mut out[i..(i + BLOCK).min(n)]);
         gate.push(v.glottis.voicing);
         p_gate.push(v.glottis.pressure_gate);
         a_gate.push(v.glottis.adduct_gate);
+        p_th.push(v.glottis.threshold_now / CM_H2O);
         abd.push(v.glottis.static_abduction());
         let f = v.airway.frame.as_ref().expect("the airway publishes a frame every block");
         closed.push(if f.grid.iter().map(|g| g.area).fold(f64::MAX, f64::min) < 0.01 { 1.0 } else { 0.0 });
@@ -157,7 +161,7 @@ fn probe(word: &str, dur: f64, vot: Option<f64>, larynx: Larynx, tongue_none: bo
     let share = |thr: f64| inside.iter().filter(|f| f.2 < thr && db(f.1) > -35.0).count() as f64 / inside.len().max(1) as f64;
     let voiced = [share(0.15), share(0.30), share(0.45)];
     let rms_db = db((inside.iter().map(|f| f.1 * f.1).sum::<f64>() / inside.len().max(1) as f64).sqrt());
-    Row { dur_ms: (t1 - t0) * 1000.0, voiced, rms_db, gate: mean(&gate), p_gate: mean(&p_gate), a_gate: mean(&a_gate), abd: mean(&abd), closed: mean(&closed), tb_y: mean(&tb_y) }
+    Row { dur_ms: (t1 - t0) * 1000.0, voiced, rms_db, gate: mean(&gate), p_gate: mean(&p_gate), a_gate: mean(&a_gate), p_th: mean(&p_th), abd: mean(&abd), closed: mean(&closed), tb_y: mean(&tb_y) }
 }
 
 fn main() {
@@ -180,8 +184,8 @@ fn main() {
     let rev = std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
     let dirty = std::process::Command::new("git").args(["status", "--porcelain", "--untracked-files=no"]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
     println!("# devoicing_probe at {}{}", rev.trim(), if dirty { " (uncommitted changes)" } else { "" });
-    println!("# male, f0 {F0} Hz, frame e_X_to, no stress, fs {FS}, own opening {OWN_DEFAULT} cm2 (swept in the own-sweep block), voicing gate closes at 0.08-0.22 cm2 static abduction");
-    println!("block\tword\tgroup\tcontext\tvot\tlarynx\ttongue\tvowel_ms\tvoiced15\tvoiced30\tvoiced45\trms_db\tgate\tp_gate\ta_gate\tabd\tclosed\ttb_y");
+    println!("# male, f0 {F0} Hz, frame e_X_to, no stress, fs {FS}, own opening {OWN_DEFAULT} cm2 (swept in the own-sweep block)");
+    println!("block\tword\tgroup\tcontext\tvot\tlarynx\ttongue\tvowel_ms\tvoiced15\tvoiced30\tvoiced45\trms_db\tgate\tp_gate\ta_gate\tp_th\tabd\tclosed\ttb_y");
     let rows: Vec<Vec<String>> = std::thread::scope(|sc| {
         let handles: Vec<_> = words
             .iter()
@@ -193,10 +197,10 @@ fn main() {
                         let r = probe(w, d, vot, l, none);
                         let vot_s = vot.map_or("unasp".to_string(), |s| format!("{:.0}ms", s * 1000.0));
                         lines.push(format!(
-                            "{block}\t{w}\t{grp}\t{ctx}\t{vot_s}\t{}\t{}\t{:.0}\t{:.3}\t{:.3}\t{:.3}\t{:.1}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}",
+                            "{block}\t{w}\t{grp}\t{ctx}\t{vot_s}\t{}\t{}\t{:.0}\t{:.3}\t{:.3}\t{:.3}\t{:.1}\t{:.3}\t{:.3}\t{:.3}\t{:.2}\t{:.3}\t{:.3}\t{:.3}",
                             l.name(),
                             if none { "none" } else { "target" },
-                            r.dur_ms, r.voiced[0], r.voiced[1], r.voiced[2], r.rms_db, r.gate, r.p_gate, r.a_gate, r.abd, r.closed, r.tb_y
+                            r.dur_ms, r.voiced[0], r.voiced[1], r.voiced[2], r.rms_db, r.gate, r.p_gate, r.a_gate, r.p_th, r.abd, r.closed, r.tb_y
                         ));
                     };
                     for vot in vots {

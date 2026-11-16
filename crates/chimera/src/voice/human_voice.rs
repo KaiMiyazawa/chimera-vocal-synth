@@ -46,6 +46,13 @@ fn default_brightness() -> f64 {
     DEFAULT_SOURCE.brightness
 }
 
+/// membranous glottal opening (cm²) above which the phonation threshold rises with the opening:
+/// 2·L·ξ₀ for a fold length L of 1.4 cm and the half-width ξ₀ of easiest phonation, 0.014–0.018 cm
+/// (Lucero 1996, J. Acoust. Soc. Am. 100, 2551–2554, with Titze 1988's parameters). Below it the
+/// threshold stays at its modal value; Lucero's rise toward zero width (viscous losses) is not
+/// modelled, because the source's static opening is not a prephonatory width at modal voice.
+const THRESHOLD_AREA: f64 = 0.045;
+
 pub const DEFAULT_SOURCE: VoiceSource = VoiceSource { f0: 110.0, glide: 0.06, pressure: 8.0, breathiness: 0.15, tension: 0.5, fry: 0.0, roughness: 0.1, vibrato_depth: 0.0, vibrato_rate: 6.0, drift: 5.0, voiced: true, brightness: 0.25 };
 
 /// `Partial<VoiceSource>`.
@@ -326,6 +333,7 @@ impl HumanVoice {
         // the arytenoids through the closed phase (Södersten & Lindestad 1990). It leaks a little
         // air and damps the tract, which lifts H1 and the band below 500 Hz.
         g.chink = (0.008 + 0.03 * s.breathiness) * k2;
+        g.threshold_area = THRESHOLD_AREA * k2;
         g.open_quotient = 0.78 - 0.36 * s.tension;
         // The folds close along their length and depth over a return phase, not all at once, so
         // a sung or spoken voice closes softly (0.22 at tension 0.55): an abrupt closure put

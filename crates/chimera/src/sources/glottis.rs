@@ -5,7 +5,12 @@
 //!
 //! Voicing is gated physiologically:
 //!  - transglottal pressure must exceed the phonation threshold (≈2–3 cmH₂O),
-//!  - wide abduction (voiceless consonants, /h/) stops vibration.
+//!  - wide abduction (voiceless consonants, /h/) stops vibration. With `threshold_area` set (the
+//!    human voice), it does so through the threshold: above that opening the threshold pressure
+//!    rises in proportion to it (Titze 1988's small-amplitude result, P_th = k_t·B·ξ₀/2τ, linear
+//!    in the prephonatory half-width ξ₀ above the optimum; Lucero 1996), so whether the folds stop
+//!    depends on the transglottal pressure too, and an obstruent's oral pressure stops them at a
+//!    smaller opening. Without it (the creatures), an opening above 0.08–0.22 cm² stops them.
 
 use crate::math::{Drift, PI, Rng, TAU, clamp, cos, exp, js_max, js_min, pow, sin, smoothstep};
 use crate::physics::CM_H2O;
@@ -46,6 +51,10 @@ pub struct GlottisParams {
     /// bifurcation 0..1: a logistic map drives per-cycle period and amplitude. Rising values walk
     /// through period doubling (subharmonics, ~0.3), period four (~0.55) into deterministic chaos (>0.62).
     pub chaos: f64,
+    /// membranous opening (cm²) above which the phonation threshold rises in proportion to the
+    /// opening (see the module notes); 0: the threshold is fixed and an opening of 0.08–0.22 cm²
+    /// stops the folds instead
+    pub threshold_area: f64,
 }
 
 pub const DEFAULT_GLOTTIS: GlottisParams = GlottisParams {
@@ -66,6 +75,7 @@ pub const DEFAULT_GLOTTIS: GlottisParams = GlottisParams {
     diplophonia: 0.0,
     closure: 0.0,
     chaos: 0.0,
+    threshold_area: 0.0,
 };
 
 #[derive(Clone, Debug)]
@@ -89,6 +99,8 @@ pub struct ParametricGlottis {
     /// pressure above the phonation threshold, and the folds close enough (static abduction)
     pub pressure_gate: f64,
     pub adduct_gate: f64,
+    /// the phonation threshold in force this sample (dyn/cm², telemetry)
+    pub threshold_now: f64,
     voicing_sm: f64,
     /// smoothed transglottal pressure (dyn/cm²)
     dp_sm: f64,
@@ -135,6 +147,7 @@ impl ParametricGlottis {
             static_sm: 0.0,
             pressure_gate: 0.0,
             adduct_gate: 0.0,
+            threshold_now: 2.5 * CM_H2O,
             closure_sm: 0.0,
             amp_sm: 0.0,
             sm_coef: 1.0 - exp(-1.0 / (0.004 * fs)),
@@ -179,8 +192,14 @@ impl ParametricGlottis {
         self.f0_now = f0;
 
         // voicing gate: pressure above threshold, adduction sufficient, not forcibly closed
-        let pressure_gate = smoothstep(self.threshold * 0.8, self.threshold * 1.6, self.dp_sm);
-        let adduct_gate = 1.0 - smoothstep(0.08, 0.22, self.static_sm - p.chink);
+        let open = js_max(0.0, self.static_sm - p.chink);
+        let (threshold, adduct_gate) = if p.threshold_area > 0.0 {
+            (self.threshold * js_max(1.0, open / p.threshold_area), 1.0)
+        } else {
+            (self.threshold, 1.0 - smoothstep(0.08, 0.22, open))
+        };
+        let pressure_gate = smoothstep(threshold * 0.8, threshold * 1.6, self.dp_sm);
+        self.threshold_now = threshold;
         let target = pressure_gate * adduct_gate * (1.0 - self.closure_sm);
         self.pressure_gate = pressure_gate;
         self.adduct_gate = adduct_gate;
