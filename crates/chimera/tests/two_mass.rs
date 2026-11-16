@@ -479,6 +479,7 @@ mod research_inputs {
             v.folds.closed_push_upper = true;
             v.folds.spring_cubic = 0.0;
             v.folds.contact_cubic = 0.0;
+            v.folds.abduct_rest = 0.5;
         });
         assert_eq!(plain, explicit);
     }

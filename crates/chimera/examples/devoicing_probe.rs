@@ -31,6 +31,20 @@
 //!   pressure (pharynx's first node, the oral pressure behind a constriction), and their difference.
 //! - `abd`: mean static abduction the gate reads (cm²). `tb_y`: mean tongue-body height.
 //!
+//! - `lead_ms`, `tail_ms`: from the open interval's start to the first voiced frame's centre, and
+//!   from the last voiced frame's centre to its end: the two edges of the voiced stretch, apart.
+//! - folds only (blank otherwise): the share of the interval's 20 ms frames in which the folds
+//!   close (`f_close`: the narrower channel shuts at least once), swing without closing (`f_swing`:
+//!   upper-mass displacement peak-to-peak 0.004 cm or more), or stay still (`f_still`). With the
+//!   folds `gate` and `p_gate` are blank (their voicing measure is a held swing, not a decision).
+//!
+//! Settings by environment (all recorded in the `#` lines): `PROBE_GLOTTIS` (above);
+//! `PROBE_WORDS` (a comma list, default all); `PROBE_YIN_MIN` (YIN's lowest F0, Hz, default 100);
+//! `PROBE_FOLDS_LOOP` (`on`, default, or `frozen`: the folds' trim is settled once on a held /e/
+//! at the probe's F0 and kept, the loop off); `PROBE_ABDUCT_REST` (the folds' `abduct_rest`,
+//! default the engine's 0.5; 0 makes the rest area equal the abduction asked for);
+//! `PROBE_LUNG_R` (factor on the lungs' series resistance, default 1).
+//!
 //! Output: tab-separated, with `#` lines first (commit, settings).
 //! Run: `cargo run --release -q -p chimera --example devoicing_probe > probe.tsv`
 use chimera::analysis::pitch::{YinOpts, yin_pitch};
@@ -61,6 +75,9 @@ struct Cond {
 
 #[derive(Default)]
 struct Row {
+    lead_ms: Option<f64>,
+    tail_ms: Option<f64>,
+    states: Option<(f64, f64, f64)>,
     open_ms: f64,
     voiced: Option<f64>,
     gate: f64,
@@ -123,8 +140,21 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
     let g1 = dominant(&plan.gestures, &c1.ipa, c1.t0, c1.t1).cloned();
     let mut v = HumanVoice::with_defaults(FS);
     v.set_opening_threshold(c.threshold);
+    let st = settings();
     if c.folds {
         v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), ..Default::default() });
+        if let Some(abr) = st.abduct_rest {
+            v.folds.abduct_rest = abr;
+        }
+        if let Some(trim) = st.frozen_trim {
+            v.folds.set_trim(trim);
+            v.folds.trim_loop = false;
+        }
+    }
+    if st.lung_r != 1.0 {
+        let lp = v.airway.lung_port;
+        let r = v.airway.net.port_extra_resistance(lp);
+        v.airway.net.set_port_extra_resistance(lp, r * st.lung_r);
     }
     v.schedule(&plan.gestures);
     let n = (FS * (plan.end + 0.1)).round() as usize;
@@ -141,14 +171,24 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
         tb_y: f64,
     }
     let mut blocks: Vec<B> = vec![];
+    // the folds' channel and swing, sample by sample (folds only)
+    let (mut ch, mut xs) = (vec![], vec![]);
     for i in (0..n).step_by(BLOCK) {
-        v.render(&mut out[i..(i + BLOCK).min(n)]);
+        if c.folds {
+            for j in i..(i + BLOCK).min(n) {
+                v.render(&mut out[j..j + 1]);
+                ch.push(v.folds.channel_area());
+                xs.push(v.folds.displacement());
+            }
+        } else {
+            v.render(&mut out[i..(i + BLOCK).min(n)]);
+        }
         let t = (i + BLOCK / 2) as f64 / FS;
         let f = v.airway.frame.as_ref().expect("the airway publishes a frame every block");
         let shut = f.grid.iter().map(|g| g.area).fold(f64::MAX, f64::min) < 0.01;
         let released = g0.as_ref().is_none_or(|g| activation(g, t) < 0.5);
         let not_closing = g1.as_ref().is_none_or(|g| activation(g, t) < 0.5);
-        blocks.push(B { t, open: released && not_closing && !shut, gate: v.voicing(), p_gate: if c.folds { 0.0 } else { v.glottis.pressure_gate }, ps: v.airway.net.p[sub] / CM_H2O, pg: v.airway.net.p[supra] / CM_H2O, abd: v.glottis.static_abduction(), tb_y: v.artic.x.get(ArticKey::TbY) });
+        blocks.push(B { t, open: released && not_closing && !shut, gate: v.voicing(), p_gate: v.glottis.pressure_gate, ps: v.airway.net.p[sub] / CM_H2O, pg: v.airway.net.p[supra] / CM_H2O, abd: if c.folds { v.glottis.params.abduction } else { v.glottis.static_abduction() }, tb_y: v.artic.x.get(ArticKey::TbY) });
     }
     // the open run around the vowel: the longest run of open blocks that overlaps [t0, t1]
     let mut best: Option<(usize, usize)> = None;
@@ -172,20 +212,83 @@ fn probe(word: &str, c: Cond) -> Option<Row> {
     let mean = |f: &dyn Fn(&B) -> f64| w.iter().map(f).sum::<f64>() / w.len() as f64;
     let (o0, o1) = (blocks[a].t - 0.5 * BLOCK as f64 / FS, blocks[b - 1].t + 0.5 * BLOCK as f64 / FS);
     let (win, hop) = ((0.02 * FS) as usize, (0.005 * FS) as usize);
-    let frames: Vec<(f64, f64, f64)> = (0..n.saturating_sub(win))
+    let frames: Vec<(f64, f64, f64, usize)> = (0..n.saturating_sub(win))
         .step_by(hop)
         .map(|s| {
             let x: Vec<f64> = out[s..s + win].iter().map(|&y| y as f64).collect();
             let rms = (x.iter().map(|y| y * y).sum::<f64>() / win as f64).sqrt();
-            let p = yin_pitch(&x, FS, YinOpts { min_f0: Some(100.0), max_f0: Some(300.0), threshold: None });
-            ((s + win / 2) as f64 / FS, rms, p.aperiodicity)
+            let p = yin_pitch(&x, FS, YinOpts { min_f0: Some(st.yin_min), max_f0: Some(300.0), threshold: None });
+            ((s + win / 2) as f64 / FS, rms, p.aperiodicity, s)
         })
         .collect();
     let loudest = frames.iter().map(|f| f.1).fold(1e-12, f64::max);
     let db = |r: f64| 20.0 * (r / loudest).max(1e-9).log10();
-    let inside: Vec<&(f64, f64, f64)> = frames.iter().filter(|f| f.0 >= o0 && f.0 <= o1).collect();
-    let voiced = (o1 - o0 >= 0.02 && !inside.is_empty()).then(|| inside.iter().filter(|f| f.2 < 0.3 && db(f.1) > -35.0).count() as f64 / inside.len() as f64);
-    Some(Row { open_ms: (o1 - o0) * 1000.0, voiced, gate: mean(&|b| b.gate), p_gate: mean(&|b| b.p_gate), ps: mean(&|b| b.ps), pg: mean(&|b| b.pg), abd: mean(&|b| b.abd), tb_y: mean(&|b| b.tb_y) })
+    let inside: Vec<&(f64, f64, f64, usize)> = frames.iter().filter(|f| f.0 >= o0 && f.0 <= o1).collect();
+    let is_voiced = |f: &(f64, f64, f64, usize)| f.2 < 0.3 && db(f.1) > -35.0;
+    let voiced = (o1 - o0 >= 0.02 && !inside.is_empty()).then(|| inside.iter().filter(|f| is_voiced(f)).count() as f64 / inside.len() as f64);
+    let lead_ms = inside.iter().find(|f| is_voiced(f)).map(|f| (f.0 - o0) * 1000.0);
+    let tail_ms = inside.iter().rev().find(|f| is_voiced(f)).map(|f| (o1 - f.0) * 1000.0);
+    let states = (c.folds && !inside.is_empty()).then(|| {
+        let (mut close, mut swing) = (0usize, 0usize);
+        for f in &inside {
+            let (a, b) = (f.3, (f.3 + win).min(ch.len()));
+            if ch[a..b].iter().any(|&x| x <= 1e-4) {
+                close += 1;
+            } else if xs[a..b].iter().cloned().fold(f64::MIN, f64::max) - xs[a..b].iter().cloned().fold(f64::MAX, f64::min) >= 0.004 {
+                swing += 1;
+            }
+        }
+        let k = inside.len() as f64;
+        (close as f64 / k, swing as f64 / k, (inside.len() - close - swing) as f64 / k)
+    });
+    Some(Row { lead_ms, tail_ms, states, open_ms: (o1 - o0) * 1000.0, voiced, gate: mean(&|b| b.gate), p_gate: mean(&|b| b.p_gate), ps: mean(&|b| b.ps), pg: mean(&|b| b.pg), abd: mean(&|b| b.abd), tb_y: mean(&|b| b.tb_y) })
+}
+
+/// Settings read from the environment (see the module comment).
+struct Settings {
+    words: Option<Vec<String>>,
+    yin_min: f64,
+    frozen_trim: Option<f64>,
+    abduct_rest: Option<f64>,
+    lung_r: f64,
+}
+
+static SETTINGS: std::sync::OnceLock<Settings> = std::sync::OnceLock::new();
+
+fn settings() -> &'static Settings {
+    SETTINGS.get_or_init(|| {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let num = |k: &str| env(k).map(|v| v.parse::<f64>().unwrap_or_else(|_| panic!("{k}: a number")));
+        let frozen = match env("PROBE_FOLDS_LOOP").as_deref() {
+            None | Some("on") => false,
+            Some("frozen") => true,
+            Some(o) => panic!("PROBE_FOLDS_LOOP: on or frozen, not {o}"),
+        };
+        Settings {
+            words: env("PROBE_WORDS").map(|v| v.split(',').map(|w| w.trim().to_string()).collect()),
+            yin_min: num("PROBE_YIN_MIN").unwrap_or(100.0),
+            frozen_trim: frozen.then(settled_trim),
+            abduct_rest: num("PROBE_ABDUCT_REST"),
+            lung_r: num("PROBE_LUNG_R").unwrap_or(1.0),
+        }
+    })
+}
+
+/// The folds' trim after the loop has settled on a held /e/ at the probe's F0 (frame's first vowel).
+fn settled_trim() -> f64 {
+    let mut input = tokenize_ipa("e");
+    input[0].dur = Some(0.8);
+    input[0].stress = Some(0);
+    let plan = plan_utterance(&input, &PlanOptions { body: "male".into(), t0: 0.05, f0: Some(F0), ..Default::default() });
+    let mut v = HumanVoice::with_defaults(FS);
+    v.set_source(&SourcePatch { glottis: Some(GlottisModel::TwoMass), ..Default::default() });
+    if let Some(abr) = std::env::var("PROBE_ABDUCT_REST").ok().and_then(|x| x.parse().ok()) {
+        v.folds.abduct_rest = abr;
+    }
+    v.schedule(&plan.gestures);
+    let mut out = vec![0.0f32; (0.7 * FS) as usize];
+    v.render(&mut out);
+    v.folds.trim()
 }
 
 fn main() {
@@ -200,6 +303,8 @@ fn main() {
         ("kɯɕa", "main"),
         ("kida", "control"),
         ("gida", "control"),
+        ("gada", "control"),
+        ("gɯda", "control"),
         ("gita", "control"),
         ("gɯɕa", "control"),
         ("kata", "control"),
@@ -209,7 +314,8 @@ fn main() {
     ];
     // PROBE_QUICK=1: two words, a few lengths (a check before the full run)
     let quick = std::env::var("PROBE_QUICK").is_ok_and(|v| v == "1");
-    let words: Vec<(&str, &str)> = words.into_iter().filter(|(w, _)| !quick || ["kita", "gida"].contains(w)).collect();
+    let st = settings();
+    let words: Vec<(&str, &str)> = words.into_iter().filter(|(w, _)| !quick || ["kita", "gida"].contains(w)).filter(|(w, _)| st.words.as_ref().is_none_or(|ws| ws.iter().any(|x| x == w))).collect();
     let peaked = ["kita", "kɯta", "kɯɕa"];
     let durs: Vec<f64> = if quick { vec![0.06, 0.1, 0.16] } else { (4..=20).map(|d| d as f64 * 0.01).collect() };
     let vots = [None, Some(0.03), Some(0.05)];
@@ -219,7 +325,16 @@ fn main() {
     let dirty = std::process::Command::new("git").args(["status", "--porcelain", "--untracked-files=no"]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
     println!("# devoicing_probe at {}{}", rev.trim(), if dirty { " (uncommitted changes)" } else { "" });
     println!("# male, f0 {F0} Hz, Breath 8 cmH2O, frame e_X_to, no stress, fs {FS}; glottis cutoff = engine default, threshold = research option (8 cmH2O/cm2 above 0.045 cm2), folds = two-mass; peak strength 2");
-    println!("block\tword\tgroup\tglottis\tvot\tadv_ms\tlarynx\ttongue\tnominal_ms\topen_ms\tvoiced\tgate\tp_gate\tps\tpg\tdp\tabd\ttb_y");
+    println!(
+        "# run: glottis {}; words {}; YIN min {} Hz; folds loop {}; abduct_rest {}; lung resistance x{}",
+        glottises.join(","),
+        st.words.as_ref().map_or("all".to_string(), |w| w.join(",")),
+        st.yin_min,
+        st.frozen_trim.map_or("on".to_string(), |t| format!("frozen (trim {t:.4})")),
+        st.abduct_rest.map_or("engine".to_string(), |a| a.to_string()),
+        st.lung_r
+    );
+    println!("block\tword\tgroup\tglottis\tvot\tadv_ms\tlarynx\ttongue\tnominal_ms\topen_ms\tvoiced\tgate\tp_gate\tps\tpg\tdp\tabd\ttb_y\tlead_ms\ttail_ms\tf_close\tf_swing\tf_still");
     let rows: Vec<Vec<String>> = std::thread::scope(|sc| {
         let handles: Vec<_> = words
             .iter()
@@ -234,12 +349,15 @@ fn main() {
                         let vot_s = c.vot.map_or("unasp".to_string(), |s| format!("{:.0}ms", s * 1000.0));
                         let lar = c.peak.map_or("overlap".to_string(), |a| format!("peak{a:.2}"));
                         let voiced = r.voiced.map_or(String::new(), |x| format!("{x:.3}"));
+                        let opt = |x: Option<f64>, d: usize| x.map_or(String::new(), |x| format!("{x:.d$}"));
+                        let (gate, p_gate) = if folds { (String::new(), String::new()) } else { (format!("{:.3}", r.gate), format!("{:.3}", r.p_gate)) };
+                        let states = r.states.map_or("\t\t".to_string(), |(a, b, c)| format!("{a:.3}\t{b:.3}\t{c:.3}"));
                         lines.push(format!(
-                            "{block}\t{w}\t{grp}\t{}\t{vot_s}\t{:.0}\t{lar}\t{}\t{:.0}\t{:.1}\t{voiced}\t{:.3}\t{:.3}\t{:.2}\t{:.2}\t{:.2}\t{:.3}\t{:.3}",
+                            "{block}\t{w}\t{grp}\t{}\t{vot_s}\t{:.0}\t{lar}\t{}\t{:.0}\t{:.1}\t{voiced}\t{gate}\t{p_gate}\t{:.2}\t{:.2}\t{:.2}\t{:.3}\t{:.3}\t{}\t{}\t{states}",
                             glottis,
                             c.adv * 1000.0,
                             if c.tongue_none { "none" } else { "target" },
-                            c.dur * 1000.0, r.open_ms, r.gate, r.p_gate, r.ps, r.pg, r.ps - r.pg, r.abd, r.tb_y
+                            c.dur * 1000.0, r.open_ms, r.ps, r.pg, r.ps - r.pg, r.abd, r.tb_y, opt(r.lead_ms, 1), opt(r.tail_ms, 1)
                         ));
                     };
                     for vot in vots {

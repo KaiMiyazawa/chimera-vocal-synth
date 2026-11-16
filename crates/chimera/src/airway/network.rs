@@ -458,6 +458,16 @@ impl AirwayNetwork {
     }
 
     /// Connect two nodes through a duct with its own (time-varying) area: glottis, velum port, valves, necks.
+    /// Research: a port's constant series resistance (CGS acoustic ohms), after `finalize`.
+    pub fn port_extra_resistance(&self, branch: usize) -> f64 {
+        self.port_extra_r[branch]
+    }
+
+    /// Research: change a port's constant series resistance after `finalize` (it is read every step).
+    pub fn set_port_extra_resistance(&mut self, branch: usize, r: f64) {
+        self.port_extra_r[branch] = r;
+    }
+
     pub fn add_port(&mut self, a: usize, b: usize, spec: PortSpec) -> usize {
         self.push_branch(a, b, KIND_PORT, Some(spec))
     }

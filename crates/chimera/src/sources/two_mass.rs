@@ -131,6 +131,10 @@ pub struct TriangularGlottis {
     /// research input (0 by default): the cubic term of the contact force, η in
     /// c·k·d·(1 + η·d²) with d the penetration (cm⁻²; Ishizaka & Flanagan 1972 use 500)
     pub contact_cubic: f64,
+    /// research input (`ABDUCT_REST` by default): how much of the posterior opening also parts
+    /// the folds along their length. At 0 the rest area equals the abduction asked for, as the
+    /// parametric source's does; at 0.5 it is about twice that.
+    pub abduct_rest: f64,
     // pitch loop: cycle detection on the upper mass against its running mean
     x2_mean: f64,
     mean_coef: f64,
@@ -199,6 +203,7 @@ impl TriangularGlottis {
             closed_push_upper: true,
             spring_cubic: 0.0,
             contact_cubic: 0.0,
+            abduct_rest: ABDUCT_REST,
             x2_mean: 0.0,
             mean_coef: 1.0 - exp(-TAU * 15.0 / fs),
             armed: false,
@@ -328,7 +333,7 @@ impl TriangularGlottis {
         // opening the posterior triangle (as VocalTractLab's rest displacements do for voiceless
         // sounds). Without it a whisper at a firm breath vibrated fully (pressure 15 cmH2O).
         let parted = if p.amplitude > 0.0 { 0.0 } else { WHISPER_REST };
-        self.rest_sm += sc * (self.folds.rest + parted + ABDUCT_REST * js_max(0.0, p.abduction - self.abduction_base) / len - self.rest_sm);
+        self.rest_sm += sc * (self.folds.rest + parted + self.abduct_rest * js_max(0.0, p.abduction - self.abduction_base) / len - self.rest_sm);
         // abduction (cm²) opens the posterior end: a triangle of that area, apex at the commissure
         self.post_sm += sc * (p.abduction / len - self.post_sm);
         self.chink_sm += sc * (p.chink - self.chink_sm);

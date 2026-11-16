@@ -117,7 +117,7 @@ fn run(cut: Cut, set: Set, o: Opts) -> String {
     };
     let cut_end = probe.iter().map(|g| g.t1 + g.ramp_out).fold(0.0, f64::max);
     let cut_start = probe.iter().map(|g| g.t0 - g.ramp_in).fold(f64::MAX, f64::min);
-    v.schedule(&probe.iter().map(|g| g.clone().label("probe")).collect::<Vec<_>>());
+    v.schedule(&probe.iter().map(|g| (*g).label("probe")).collect::<Vec<_>>());
     let n = (FS * 1.4) as usize;
     let freeze = (T_FREEZE * FS) as usize;
     let mut out = [0.0f32; 1];

@@ -28,6 +28,8 @@ pub struct HumanAirway {
     pub fossa: Tube,
     pub lungs: usize,
     pub glottis_port: usize,
+    /// the port from the lungs into the trachea (its series resistance stands for the lungs')
+    pub lung_port: usize,
     pub velum_port: usize,
     pub rad_lips: usize,
     pub rad_nose: usize,
@@ -110,7 +112,7 @@ impl HumanAirway {
 
         let lungs = net.add_pressure_node("lungs");
         let tr_a = 2.5 * k * k;
-        net.add_port(lungs, trachea.first_node(), PortSpec::new(tr_a, 1.0).kinetic(0.0, 0.0).resistance((0.5 * RHO * C_SOUND) / tr_a));
+        let lung_port = net.add_port(lungs, trachea.first_node(), PortSpec::new(tr_a, 1.0).kinetic(0.0, 0.0).resistance((0.5 * RHO * C_SOUND) / tr_a));
         let glottis_port = net.add_port(trachea.last_node(), pharynx.first_node(), PortSpec::new(0.0, 0.3 * k).kinetic(0.37, 1.0).slit(1.4 * k));
         net.connect(pharynx.last_node(), oral.first_node());
         let velum_port = net.add_port(pharynx.last_node(), nasal.first_node(), PortSpec::new(0.0, 1.0 * k).kinetic(0.3, 0.8));
@@ -134,6 +136,7 @@ impl HumanAirway {
             fossa,
             lungs,
             glottis_port,
+            lung_port,
             velum_port,
             rad_lips,
             rad_nose,
